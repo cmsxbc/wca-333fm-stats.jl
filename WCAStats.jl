@@ -6,6 +6,7 @@ import CSV
 import DataFrames
 import ZipFile
 import RollingFunctions
+import Printf
 
 
 function load_wca(zip_path)
@@ -25,7 +26,13 @@ end
 
 
 function get_single_res_df(wca_dict, event_id)
-    return filter(:value => !=(0), stack(get_event_result(wca_dict, event_id), [:value1, :value2, :value3, :value4, :value5]))
+    return sort(
+        filter(:value => !=(0), stack(
+            DataFrames.transform(get_event_result(wca_dict, event_id), eachindex => :index),
+            [:value1, :value2, :value3, :value4, :value5]
+        )),
+        [:index, :variable]
+    )
 end
 
 
@@ -35,7 +42,7 @@ nunique = length ∘ DataFrames.unique
 function avg(xs)
     l = length(xs)
     if l > 2
-        return (sum(xs) - sum(extrema(xs))) / l
+        return (sum(xs) - sum(extrema(xs))) / (l - 2)
     else
         return missing
     end
@@ -51,9 +58,11 @@ end
 function calc_consecutive(xs, diffs)
     xs = sort(unique(xs))
     cstart = xs[1]
+    cend = xs[1]
     ccount = 1
     cur_count = 1
     cur_start = xs[1]
+    cur_end = xs[1]
     for i in 2:length(xs)
         if (xs[i] - xs[i-1]) in diffs
             cur_count += 1
@@ -61,12 +70,19 @@ function calc_consecutive(xs, diffs)
             if cur_count > ccount
                 ccount = cur_count
                 cstart = cur_start
+                cend = xs[i-1]
             end
             cur_count = 1
             cur_start = xs[i]
+            cur_end = xs[i]
         end
     end
-    return [(ccount, cstart, cstart + ccount - 1)]
+    if cur_count > ccount
+        ccount = cur_count
+        cstart = cur_start
+        cend = xs[end]
+    end
+    return [(ccount, cstart, cend)]
 end
 
 
@@ -104,7 +120,7 @@ function stats_single_result(df, id_col, res_col)
         res_col => mode_count => [:solved_mode, :solved_mode_count],
         # res_col => (x -> [extrema(x)]) => [:solved_min, :solved_max],
         res_col => (x -> x |> extrema |> vcat ) => [:solved_min, :solved_max],
-        res_col => Base.Fix2(calc_consecutive, 1) => [:solved_consecutive, :solved_consecutive_start, :solved_consecutive_end],
+        res_col => Base.Fix2(calc_consecutive, [1]) => [:solved_consecutive, :solved_consecutive_start, :solved_consecutive_end],
         res_col => Base.Fix1(calc_rolling_mean, 12) => [:solved_mo12_last, :solved_mo12_best],
         res_col => Base.Fix1(calc_rolling_mean, 50) => [:solved_mo50_last, :solved_mo50_best],
         res_col => Base.Fix1(calc_rolling_mean, 100) => [:solved_mo100_last, :solved_mo100_best],
@@ -135,7 +151,7 @@ function stats_round_result(df, id_col)
             :best => avg => :best_avg,
             :best => DataFrames.median => :best_median,
             :best => mode_count => [:best_mode, :best_mode_count],
-            :best => Base.Fix2(calc_consecutive, 1) => [:best_consecutive, :best_consecutive_start, :best_consecutive_end],
+            :best => Base.Fix2(calc_consecutive, [1]) => [:best_consecutive, :best_consecutive_start, :best_consecutive_end],
         ),
         on=id_col
     )
@@ -166,7 +182,7 @@ function stats_round_result(df, id_col)
             :average => avg => :average_avg,
             :average => DataFrames.median => :average_median,
             :average => mode_count => [:average_mode, :average_mode_count],
-            :average => Base.Fix2(calc_consecutive, 1) => [:average_consecutive, :average_consecutive_start, :average_consecutive_end],
+            :average => Base.Fix2(calc_consecutive, [33, 34]) => [:average_consecutive, :average_consecutive_start, :average_consecutive_end],
             :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
             :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
         ),
@@ -174,6 +190,28 @@ function stats_round_result(df, id_col)
     )
 
     return rdf
+end
+
+
+function print_some_persons(df, person_ids)
+    df = filter(:personId => x -> x ∈ person_ids, df)
+    lens = collect(map(length, df[!, :personName]))
+    col_name_len = maximum(map(length, names(df)))
+    _t = nonmissingtype ∘ eltype
+
+    # fmt = Dict(Float64="%*f\t", Int64="%*d\t", Char=)
+
+    for name_col in zip(names(df), eachcol(df))
+        Printf.@printf "%*s" col_name_len name_col[1]
+        for len_et in zip(lens, name_col[2])
+            if _t(len_et[2]) == Float64
+                Printf.@printf "    %*.*f" (len_et[1]) 2 len_et[2]
+            else
+                Printf.@printf "    %*s" len_et[1] len_et[2]
+            end
+        end
+        println("")
+    end
 end
 
 
@@ -195,8 +233,12 @@ function __init__()
         on=:personId
     )
     println(DataFrames.nrow(df))
-    println(first(df, 10))
-    println(filter(:personId => x -> x ∈ ["2014WENW01", "2008DONG06", "2012LIUY03"], df))
+    # println(first(df, 10))
+    if length(ARGS) > 1
+        print_some_persons(df, ARGS[2:end])
+    else
+        print_some_persons(df, ["2014WENW01", "2008DONG06", "2012LIUY03"])
+    end
 end
 
 end # module WCAStats
