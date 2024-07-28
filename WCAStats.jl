@@ -170,19 +170,20 @@ function stats_round_result(df, id_col)
             DataFrames.groupby(
                 DataFrames.transform(
                     filter(:average => >(0), df),
-                    DataFrames.AsTable([:value1, :value2, :value3]) => DataFrames.ByRow(x -> [maximum(x), DataFrames.median(x)]) => [:wrost_in_average, :median_in_average]
+                    DataFrames.AsTable([:value1, :value2, :value3]) => DataFrames.ByRow(x -> [maximum(x), DataFrames.median(x)]) => [:wrost_in_average, :median_in_average],
+                    :average => (x -> x / 100) => :average_real,
                 ),
                 id_col,
             ),
-            :average => (x -> x |> extrema |> vcat ) => [:average, :average_max],
+            :average_real => (x -> x |> extrema |> vcat ) => [:average, :average_max],
             DataFrames.nrow => :average_count,
             :average => nunique => :average_nunique,
-            :average => DataFrames.mean => :average_mean,
-            :average => DataFrames.std => :average_std,
-            :average => avg => :average_avg,
-            :average => DataFrames.median => :average_median,
-            :average => mode_count => [:average_mode, :average_mode_count],
-            :average => Base.Fix2(calc_consecutive, [33, 34]) => [:average_consecutive, :average_consecutive_start, :average_consecutive_end],
+            :average_real => DataFrames.mean => :average_mean,
+            :average_real => DataFrames.std => :average_std,
+            :average_real => avg => :average_avg,
+            :average_real => DataFrames.median => :average_median,
+            :average => (x -> [(x[1][1] / 100, x[1][2])]) ∘ mode_count => [:average_mode, :average_mode_count],
+            :average => (x -> [(x[1][1], x[1][2] / 100, x[1][3] / 100)]) ∘ Base.Fix2(calc_consecutive, [33, 34]) => [:average_consecutive, :average_consecutive_start, :average_consecutive_end],
             :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
             :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
         ),
@@ -198,9 +199,6 @@ function print_some_persons(df, person_ids)
     lens = collect(map(length, df[!, :personName]))
     col_name_len = maximum(map(length, names(df)))
     _t = nonmissingtype ∘ eltype
-
-    # fmt = Dict(Float64="%*f\t", Int64="%*d\t", Char=)
-
     for name_col in zip(names(df), eachcol(df))
         Printf.@printf "%*s" col_name_len name_col[1]
         for len_et in zip(lens, name_col[2])
@@ -235,7 +233,10 @@ function __init__()
     println(DataFrames.nrow(df))
     # println(first(df, 10))
     if length(ARGS) > 1
-        print_some_persons(df, ARGS[2:end])
+        CSV.write(ARGS[2], df)
+    end
+    if length(ARGS) > 2
+        print_some_persons(df, ARGS[3:end])
     else
         print_some_persons(df, ["2014WENW01", "2008DONG06", "2012LIUY03"])
     end
