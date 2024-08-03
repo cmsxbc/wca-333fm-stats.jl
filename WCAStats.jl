@@ -222,6 +222,7 @@ function __init__()
         stats_single_result(fm_single_res_df, :personId, :value),
         on=:personId
     )
+    all_cols = filter(!=("personId"), names(df))
     df = DataFrames.rightjoin(
         DataFrames.rename(
             wca_data["Persons"][!, [:id, :name, :countryId, :gender]],
@@ -229,6 +230,23 @@ function __init__()
         ),
         df,
         on=:personId
+    )
+    desc_cols = [
+        :competitions, :rounds, :chances, :attempts,
+        :solved_count, :solved_nunique, :solved_mode_count, :solved_consecutive,
+        :best_count, :best_nunique, :best_mode_count, :best_consecutive,
+        :average_attempts, :average_count, :average_nunique, :average_mode_count, :average_consecutive
+    ]
+    asc_cols = filter(x->(x ∉ map(String, desc_cols)), all_cols)
+    DataFrames.transform!(
+        df,
+        map(x->(x=>StatsBase.competerank=>Symbol("$x" * "_rank")), asc_cols),
+        map(x->(x=>(y->StatsBase.competerank(y, rev=true))=>Symbol("$x" * "_rank")), desc_cols),
+    )
+    df = DataFrames.transform!(
+        DataFrames.groupby(df, :countryId),
+        map(x->(x=>StatsBase.competerank=>Symbol("$x" * "_nr")), asc_cols),
+        map(x->(x=>(y->StatsBase.competerank(y, rev=true))=>Symbol("$x" * "_nr")), desc_cols),
     )
     println(DataFrames.nrow(df))
     # println(first(df, 10))
