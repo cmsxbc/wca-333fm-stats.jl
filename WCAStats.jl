@@ -121,6 +121,8 @@ function stats_single_result(df, id_col, res_col)
         # res_col => (x -> [extrema(x)]) => [:solved_min, :solved_max],
         res_col => (x -> x |> extrema |> vcat ) => [:solved_min, :solved_max],
         res_col => Base.Fix2(calc_consecutive, [1]) => [:solved_consecutive, :solved_consecutive_start, :solved_consecutive_end],
+        res_col => Base.Fix1(calc_rolling_mean, 3) => [:solved_mo3_last, :solved_mo3_best],
+        res_col => Base.Fix1(calc_rolling_mean, 5) => [:solved_mo5_last, :solved_mo5_best],
         res_col => Base.Fix1(calc_rolling_mean, 12) => [:solved_mo12_last, :solved_mo12_best],
         res_col => Base.Fix1(calc_rolling_mean, 50) => [:solved_mo50_last, :solved_mo50_best],
         res_col => Base.Fix1(calc_rolling_mean, 100) => [:solved_mo100_last, :solved_mo100_best],
