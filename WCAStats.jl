@@ -227,7 +227,10 @@ function __init__()
     all_cols = filter(!=("personId"), names(df))
     df = DataFrames.rightjoin(
         DataFrames.rename(
-            wca_data["Persons"][!, [:id, :name, :countryId, :gender]],
+            filter(
+                :subid => ==(1),
+                wca_data["Persons"]
+            )[!, [:id, :name, :countryId, :gender]],
             :id => :personId, :name => :personName
         ),
         df,
