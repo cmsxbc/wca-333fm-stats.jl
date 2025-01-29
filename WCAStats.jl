@@ -3,6 +3,7 @@ module WCAStats
 import Base
 import StatsBase
 import CSV
+import DataAPI
 import DataFrames
 import ZipFile
 import RollingFunctions
@@ -253,13 +254,14 @@ function __init__()
         map(x->(x=>StatsBase.competerank=>Symbol("$x" * "_nr")), asc_cols),
         map(x->(x=>(y->StatsBase.competerank(y, rev=true))=>Symbol("$x" * "_nr")), desc_cols),
     )
-    println(DataFrames.nrow(df))
-    # println(first(df, 10))
+    # println(DataFrames.nrow(df))
+    CSV.write("results.csv", df)
+    top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...)->any(vv -> isless(vv, 100), v), df)
+    CSV.write("results.top100.csv", top100_df)
+    china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...)->any(vv -> isless(vv, 30), v), filter(:countryId=>==("China"), df))
+    CSV.write("results.china.top30.csv", china_top30_df)
     if length(ARGS) > 1
-        CSV.write(ARGS[2], df)
-    end
-    if length(ARGS) > 2
-        print_some_persons(df, ARGS[3:end])
+        print_some_persons(df, ARGS[2:end])
     else
         print_some_persons(df, ["2014WENW01", "2008DONG06", "2012LIUY03"])
     end
