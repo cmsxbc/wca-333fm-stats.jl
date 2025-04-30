@@ -193,6 +193,24 @@ function stats_round_result(df, id_col)
         on=id_col
     )
 
+    rdf = DataFrames.leftjoin(
+        rdf,
+        DataFrames.combine(
+            DataFrames.groupby(
+                filter(
+                    :best => >(0),
+                    filter(
+                        :roundTypeId => x -> x ∈ ["f", "c"],
+                        df
+                    )
+                ),
+                id_col
+            ),
+            :pos => (x -> [(count(==(1), x), count(==(2), x), count(==(3), x))]) => [:gold, :silver, :bronze]
+        ),
+        on=id_col
+    )
+
     return rdf
 end
 
@@ -241,7 +259,8 @@ function __init__()
         :competitions, :rounds, :chances, :attempts,
         :solved_count, :solved_nunique, :solved_mode_count, :solved_consecutive,
         :best_count, :best_nunique, :best_mode_count, :best_consecutive,
-        :average_attempts, :average_count, :average_nunique, :average_mode_count, :average_consecutive
+        :average_attempts, :average_count, :average_nunique, :average_mode_count, :average_consecutive,
+        :gold, :silver, :bronze
     ]
     asc_cols = filter(x->(x ∉ map(String, desc_cols)), all_cols)
     DataFrames.transform!(
