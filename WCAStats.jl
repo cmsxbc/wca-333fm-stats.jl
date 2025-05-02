@@ -8,6 +8,7 @@ import DataFrames
 import ZipFile
 import RollingFunctions
 import Printf
+import ArgParse
 
 
 function load_wca(zip_path)
@@ -234,8 +235,51 @@ function print_some_persons(df, person_ids)
 end
 
 
+function print_topk(df, col, k, country)
+    rank_col = Symbol("$col" * "_rank")
+    nr_col = Symbol("$col" * "_nr")
+    cols = [:personName, :countryId, col, nr_col, rank_col]
+    if country === missing
+        filter_col = rank_col
+    else
+        filter_col = nr_col
+        df = filter(:countryId => ==(country), df)
+    end
+    df = sort(filter(filter_col => (x -> x !== missing && x <= k), df), [filter_col])[!, cols]
+    println(df)
+end
+
+
 function __init__()
-    wca_data = load_wca(ARGS[1])
+    s = ArgParse.ArgParseSettings(commands_are_required = false)
+    @ArgParse.add_arg_table! s begin
+        "source"
+            required = true
+        "person", "P"
+            help = "print some persons"
+            action = :command
+        "topk", "K"
+            help = "print topk"
+            action = :command
+    end
+
+    @ArgParse.add_arg_table! s["person"] begin
+        "ids"
+            nargs = '*'
+            action = "store_arg"
+    end
+
+    @ArgParse.add_arg_table! s["topk"] begin
+        "col"
+        "--k"
+            default = 10
+            arg_type = Int
+        "--country"
+            default = missing
+    end
+    parsed_args = ArgParse.parse_args(s)
+
+    wca_data = load_wca(parsed_args["source"])
     println("load data done")
     fm_single_res_df = get_single_res_df(wca_data, "333fm")
     df = DataFrames.leftjoin(
@@ -279,10 +323,13 @@ function __init__()
     CSV.write("results.top100.csv", top100_df)
     china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...)->any(vv -> isless(vv, 30), v), filter(:countryId=>==("China"), df))
     CSV.write("results.china.top30.csv", china_top30_df)
-    if length(ARGS) > 1
-        print_some_persons(df, ARGS[2:end])
+
+    if parsed_args["%COMMAND%"] === "topk"
+        print_topk(df, Symbol(parsed_args["topk"]["col"]), parsed_args["topk"]["k"], parsed_args["topk"]["country"])
     else
-        print_some_persons(df, ["2014WENW01", "2008DONG06", "2012LIUY03"])
+        if parsed_args["%COMMAND%"] == "person"
+            print_some_persons(df, parsed_args["person"]["ids"])
+        end
     end
 end
 
