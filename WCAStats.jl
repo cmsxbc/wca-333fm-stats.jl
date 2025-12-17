@@ -14,6 +14,10 @@ import ArgParse
 function load_wca(zip_path)
     d = Dict()
     z = ZipFile.Reader(zip_path)
+    if occursin("WCA_export_v2_", zip_path)
+        println("v2 version is not ready")
+        return missing
+    end
     for name in ["Persons", "Results"]
         filename = "WCA_export_" * name * ".tsv"
         d[name] = CSV.read(read(z.files[findfirst(x->x.name==filename, z.files)]), DataFrames.DataFrame)
@@ -280,6 +284,10 @@ function __init__()
     parsed_args = ArgParse.parse_args(s)
 
     wca_data = load_wca(parsed_args["source"])
+    if wca_data === missing
+        println("cannot load data")
+        return
+    end
     println("load data done")
     fm_single_res_df = get_single_res_df(wca_data, "333fm")
     df = DataFrames.leftjoin(
