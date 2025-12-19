@@ -16,7 +16,26 @@ function load_wca(zip_path)
     z = ZipFile.Reader(zip_path)
     if occursin("WCA_export_v2_", zip_path)
         println("v2 version is not ready")
-        return missing
+        for name in ["persons", "results", "result_attempts"]
+            filename = "WCA_export_" * name * ".tsv"
+            d[name] = CSV.read(read(z.files[findfirst(x->x.name==filename, z.files)]), DataFrames.DataFrame)
+        end
+        d["Persons"] = d["persons"]
+        d["Results"] = DataFrames.leftjoin(
+            d["results"],
+            DataFrames.rename(
+                DataFrames.unstack( 
+                    DataFrames.transform!(
+                        d["result_attempts"],
+                        map(x->(x=> "value" * string(x) => :attempt_name), :attempt_number)
+                    ),
+                    :result_id, :attempt_name, :value
+                ),
+                :result_id => :id
+            ),
+            on=:id
+        )
+        return d
     end
     for name in ["Persons", "Results"]
         filename = "WCA_export_" * name * ".tsv"
