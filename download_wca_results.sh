@@ -2,7 +2,7 @@
 
 set -ex
 
-version="v1"
+version="v2"
 WCA_PUB_URL="https://www.worldcubeassociation.org/export/results"
 WCA_PERMA_URL="https://www.worldcubeassociation.org/export/results/${version}/tsv"
 
@@ -16,7 +16,7 @@ mkdir -p "$workdir"
 #     curl -sSL "$WCA_PUB_URL" -o "$pub_html_file"
 # fi
 
-link_file="$workdir/permalink.head.txt"
+link_file="$workdir/permalink.$version.head.txt"
 if [[ ! -e "$link_file" ]];then
     curl -I "$WCA_PERMA_URL" -o "$link_file"
 fi

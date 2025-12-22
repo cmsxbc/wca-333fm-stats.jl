@@ -11,53 +11,62 @@ import Printf
 import ArgParse
 
 
+@enum WCA_VERSION WCA_V1=1 WCA_V2=2
+
+
 function load_wca(zip_path)
     d = Dict()
     z = ZipFile.Reader(zip_path)
     if occursin("WCA_export_v2_", zip_path)
-        println("v2 version is not ready")
         for name in ["persons", "results", "result_attempts"]
             filename = "WCA_export_" * name * ".tsv"
             d[name] = CSV.read(read(z.files[findfirst(x->x.name==filename, z.files)]), DataFrames.DataFrame)
         end
-        d["Persons"] = d["persons"]
-        d["Results"] = DataFrames.leftjoin(
-            d["results"],
-            DataFrames.rename(
-                DataFrames.unstack( 
-                    DataFrames.transform!(
-                        d["result_attempts"],
-                        map(x->(x=> "value" * string(x) => :attempt_name), :attempt_number)
-                    ),
-                    :result_id, :attempt_name, :value
-                ),
-                :result_id => :id
-            ),
-            on=:id
-        )
-        return d
+        return [WCA_V2, d]
     end
     for name in ["Persons", "Results"]
         filename = "WCA_export_" * name * ".tsv"
         d[name] = CSV.read(read(z.files[findfirst(x->x.name==filename, z.files)]), DataFrames.DataFrame)
     end
-    return d
+    return [WCA_V1, d]
 end
 
 
-function get_event_result(wca_dict, event_id)
-    return filter(:eventId => ==(event_id), wca_dict["Results"])
+function get_event_result(wca_dict, event_id, wca_version)
+    if wca_version == WCA_V1
+        return filter(:eventId => ==(event_id), wca_dict["Results"])
+    elseif wca_version == WCA_V2
+        return DataFrames.rename(
+            filter(:event_id => ==(event_id), wca_dict["results"]),
+            :competition_id => :competitionId,
+            :person_id => :personId,
+            :round_type_id => :roundTypeId
+        )
+    else
+        return missing
+    end
 end
 
 
-function get_single_res_df(wca_dict, event_id)
-    return sort(
-        filter(:value => !=(0), stack(
-            DataFrames.transform(get_event_result(wca_dict, event_id), eachindex => :index),
-            [:value1, :value2, :value3, :value4, :value5]
-        )),
-        [:index, :variable]
-    )
+function get_single_res_df(wca_dict, event_id, wca_version)
+    res_df = get_event_result(wca_dict, event_id, wca_version)
+    if wca_version == WCA_V1
+        return sort(
+            filter(:value => !=(0), stack(
+                DataFrames.transform(res_df, eachindex => :index),
+                [:value1, :value2, :value3, :value4, :value5]
+            )),
+            [:index, :variable]
+        )
+    elseif wca_version == WCA_V2
+        return DataFrames.leftjoin(
+            res_df, wca_dict["result_attempts"],
+            on = :id => :result_id,
+            makeunique = true,
+        )
+    else
+        return missing
+    end
 end
 
 
@@ -197,7 +206,7 @@ function stats_round_result(df, id_col)
             DataFrames.groupby(
                 DataFrames.transform(
                     filter(:average => >(0), df),
-                    DataFrames.AsTable([:value1, :value2, :value3]) => DataFrames.ByRow(x -> [maximum(x), DataFrames.median(x)]) => [:wrost_in_average, :median_in_average],
+                    # DataFrames.AsTable([:value1, :value2, :value3]) => DataFrames.ByRow(x -> [maximum(x), DataFrames.median(x)]) => [:wrost_in_average, :median_in_average],
                     :average => (x -> x / 100) => :average_real,
                 ),
                 id_col,
@@ -211,8 +220,8 @@ function stats_round_result(df, id_col)
             :average_real => DataFrames.median => :average_median,
             :average => (x -> [(x[1][1] / 100, x[1][2])]) ∘ mode_count => [:average_mode, :average_mode_count],
             :average => (x -> [(x[1][1], x[1][2] / 100, x[1][3] / 100)]) ∘ Base.Fix2(calc_consecutive, [33, 34]) => [:average_consecutive, :average_consecutive_start, :average_consecutive_end],
-            :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
-            :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
+            # :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
+            # :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
         ),
         on=id_col
     )
@@ -302,30 +311,45 @@ function __init__()
     end
     parsed_args = ArgParse.parse_args(s)
 
-    wca_data = load_wca(parsed_args["source"])
+    dv, wca_data = load_wca(parsed_args["source"])
     if wca_data === missing
         println("cannot load data")
         return
     end
-    println("load data done")
-    fm_single_res_df = get_single_res_df(wca_data, "333fm")
+    Printf.@printf "Load Data version %d done" Int(dv)
+    fm_single_res_df = get_single_res_df(wca_data, "333fm", dv)
     df = DataFrames.leftjoin(
-        stats_round_result(get_event_result(wca_data, "333fm"), :personId),
+        stats_round_result(get_event_result(wca_data, "333fm", dv), :personId),
         stats_single_result(fm_single_res_df, :personId, :value),
         on=:personId
     )
     all_cols = filter(!=("personId"), names(df))
-    df = DataFrames.rightjoin(
-        DataFrames.rename(
-            filter(
-                :subid => ==(1),
-                wca_data["Persons"]
-            )[!, [:id, :name, :countryId, :gender]],
-            :id => :personId, :name => :personName
-        ),
-        df,
-        on=:personId
-    )
+    if dv == WCA_V1
+        df = DataFrames.rightjoin(
+            DataFrames.rename(
+                filter(
+                    :subid => ==(1),
+                    wca_data["Persons"]
+                )[!, [:id, :name, :countryId, :gender]],
+                :id => :personId, :name => :personName
+            ),
+            df,
+            on = :personId
+        )
+    else
+        df = DataFrames.rightjoin(
+            DataFrames.rename(
+                filter(
+                    :sub_id => ==(1),
+                    wca_data["persons"]
+                )[!, [:wca_id, :name, :country_id, :gender]],
+                :wca_id => :personId, :name => :personName,
+                :country_id => :countryId
+            ),
+            df,
+            on = :personId
+        )
+    end
     desc_cols = [
         :competitions, :rounds, :chances, :attempts,
         :solved_count, :solved_nunique, :solved_mode_count, :solved_consecutive,
