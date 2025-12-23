@@ -59,10 +59,13 @@ function get_single_res_df(wca_dict, event_id, wca_version)
             [:index, :variable]
         )
     elseif wca_version == WCA_V2
-        return DataFrames.leftjoin(
-            res_df, wca_dict["result_attempts"],
-            on = :id => :result_id,
-            makeunique = true,
+        return sort(
+            DataFrames.leftjoin(
+                res_df, wca_dict["result_attempts"],
+                on = :id => :result_id,
+                makeunique = true,
+            ),
+            [:id, :attempt_number]
         )
     else
         return missing
@@ -318,6 +321,7 @@ function __init__()
     end
     println("Load Data version $(Int(dv)) done")
     fm_single_res_df = get_single_res_df(wca_data, "333fm", dv)
+    CSV.write("fm_single_res.csv", fm_single_res_df)
     df = DataFrames.leftjoin(
         stats_round_result(get_event_result(wca_data, "333fm", dv), :personId),
         stats_single_result(fm_single_res_df, :personId, :value),
