@@ -316,7 +316,7 @@ function __init__()
         println("cannot load data")
         return
     end
-    Printf.@printf "Load Data version %d done" Int(dv)
+    println("Load Data version $(Int(dv)) done")
     fm_single_res_df = get_single_res_df(wca_data, "333fm", dv)
     df = DataFrames.leftjoin(
         stats_round_result(get_event_result(wca_data, "333fm", dv), :personId),
