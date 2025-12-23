@@ -250,6 +250,28 @@ function stats_round_result(df, id_col)
     return rdf
 end
 
+function stats_round_non_best_result(event_df, single_df, dv, id_col, val_col)
+    if dv == WCA_V1
+        df = DataFrames.transform(
+            filter(:average => >(0), event_df),
+            DataFrames.AsTable([:value1, :value2, :value3]) => DataFrames.ByRow(x -> [maximum(x), DataFrames.median(x)]) => [:wrost_in_average, :median_in_average]
+        )
+    elseif dv == WCA_V2
+        df = DataFrames.combine(
+            DataFrames.groupby(filter(:average => >(0), single_df), :id),
+            val_col => maximum => :wrost_in_average,
+            val_col => (x -> Int(DataFrames.median(x))) => :median_in_average,
+            id_col => last => id_col
+        )
+    else
+        return missing
+    end
+    return DataFrames.combine(
+        DataFrames.groupby(df, id_col),
+        :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
+        :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
+    )
+end
 
 function print_some_persons(df, person_ids)
     df = filter(:personId => x -> x ∈ person_ids, df)
@@ -321,10 +343,15 @@ function __init__()
     end
     println("Load Data version $(Int(dv)) done")
     fm_single_res_df = get_single_res_df(wca_data, "333fm", dv)
-    CSV.write("fm_single_res.csv", fm_single_res_df)
+    event_df = get_event_result(wca_data, "333fm", dv)
     df = DataFrames.leftjoin(
-        stats_round_result(get_event_result(wca_data, "333fm", dv), :personId),
+        stats_round_result(event_df, :personId),
         stats_single_result(fm_single_res_df, :personId, :value),
+        on=:personId
+    )
+    df = DataFrames.leftjoin(
+        df,
+        stats_round_non_best_result(event_df, fm_single_res_df, dv, :personId, :value),
         on=:personId
     )
     all_cols = filter(!=("personId"), names(df))
