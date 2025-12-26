@@ -9,6 +9,7 @@ import ZipFile
 import RollingFunctions
 import Printf
 import ArgParse
+import Profile
 
 
 @enum WCA_VERSION WCA_V1 = 1 WCA_V2 = 2
@@ -307,35 +308,7 @@ function print_topk(df, col, k, country)
 end
 
 
-function __init__()
-    s = ArgParse.ArgParseSettings(commands_are_required=false)
-    ArgParse.@add_arg_table! s begin
-        "source"
-        required = true
-        "person", "P"
-        help = "print some persons"
-        action = :command
-        "topk", "K"
-        help = "print topk"
-        action = :command
-    end
-
-    ArgParse.@add_arg_table! s["person"] begin
-        "ids"
-        nargs = '*'
-        action = "store_arg"
-    end
-
-    ArgParse.@add_arg_table! s["topk"] begin
-        "col"
-        "--k"
-        default = 10
-        arg_type = Int
-        "--country"
-        default = missing
-    end
-    parsed_args = ArgParse.parse_args(s)
-
+function process_data(parsed_args)
     dv, wca_data = load_wca(parsed_args["source"])
     if wca_data === missing
         println("cannot load data")
@@ -399,7 +372,6 @@ function __init__()
         map(x -> (x => StatsBase.competerank => Symbol("$x" * "_nr")), asc_cols),
         map(x -> (x => (y -> StatsBase.competerank(y, rev=true)) => Symbol("$x" * "_nr")), desc_cols),
     )
-    # println(DataFrames.nrow(df))
     CSV.write("results.csv", df)
     top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...) -> any(vv -> isless(vv, 100), v), df)
     CSV.write("results.top100.csv", top100_df)
@@ -408,10 +380,63 @@ function __init__()
 
     if parsed_args["%COMMAND%"] === "topk"
         print_topk(df, Symbol(parsed_args["topk"]["col"]), parsed_args["topk"]["k"], parsed_args["topk"]["country"])
-    else
-        if parsed_args["%COMMAND%"] == "person"
-            print_some_persons(df, parsed_args["person"]["ids"])
+    elseif parsed_args["%COMMAND%"] == "person"
+        print_some_persons(df, parsed_args["person"]["ids"])
+    end
+end
+
+
+function __init__()
+    s = ArgParse.ArgParseSettings(commands_are_required=false)
+    ArgParse.@add_arg_table! s begin
+        "source"
+        required = true
+        "person", "P"
+        help = "print some persons"
+        action = :command
+        "topk", "K"
+        help = "print topk"
+        action = :command
+    end
+
+    ArgParse.@add_arg_table! s["person"] begin
+        "ids"
+        nargs = '*'
+        action = "store_arg"
+    end
+
+    ArgParse.@add_arg_table! s["topk"] begin
+        "col"
+        "--k"
+        default = 10
+        arg_type = Int
+        "--country"
+        default = missing
+    end
+
+    ArgParse.@add_arg_table! s begin
+        "--profile"
+        help = "enable profiling"
+        action = :store_true
+        "--profile-out"
+        help = "profile output file"
+        default = "profile.txt"
+    end
+    parsed_args = ArgParse.parse_args(s)
+
+    if parsed_args["profile"]
+        Profile.clear()
+        Profile.init(n=10^7, delay=0.01)
+        Profile.@profile process_data(parsed_args)
+
+        println("\n=== Profile Results ===")
+        Profile.print(format=:flat, sortedby=:count, C=true)
+        open(parsed_args["profile-out"], "w") do io
+            Profile.print(io, format=:flat, sortedby=:count, C=true)
         end
+        println("\nProfile data saved to: $(parsed_args["profile-out"])")
+    else
+        process_data(parsed_args)
     end
 end
 
