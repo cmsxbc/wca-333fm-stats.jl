@@ -11,7 +11,7 @@ import Printf
 import ArgParse
 
 
-@enum WCA_VERSION WCA_V1=1 WCA_V2=2
+@enum WCA_VERSION WCA_V1 = 1 WCA_V2 = 2
 
 
 function load_wca(zip_path)
@@ -20,13 +20,13 @@ function load_wca(zip_path)
     if occursin("WCA_export_v2_", zip_path)
         for name in ["persons", "results", "result_attempts"]
             filename = "WCA_export_" * name * ".tsv"
-            d[name] = CSV.read(read(z.files[findfirst(x->x.name==filename, z.files)]), DataFrames.DataFrame)
+            d[name] = CSV.read(read(z.files[findfirst(x -> x.name == filename, z.files)]), DataFrames.DataFrame)
         end
         return [WCA_V2, d]
     end
     for name in ["Persons", "Results"]
         filename = "WCA_export_" * name * ".tsv"
-        d[name] = CSV.read(read(z.files[findfirst(x->x.name==filename, z.files)]), DataFrames.DataFrame)
+        d[name] = CSV.read(read(z.files[findfirst(x -> x.name == filename, z.files)]), DataFrames.DataFrame)
     end
     return [WCA_V1, d]
 end
@@ -62,8 +62,8 @@ function get_single_res_df(wca_dict, event_id, wca_version)
         return sort(
             DataFrames.leftjoin(
                 res_df, wca_dict["result_attempts"],
-                on = :id => :result_id,
-                makeunique = true,
+                on=:id => :result_id,
+                makeunique=true,
             ),
             [:id, :attempt_number]
         )
@@ -156,7 +156,7 @@ function stats_single_result(df, id_col, res_col)
         res_col => DataFrames.median => :solved_median,
         res_col => mode_count => [:solved_mode, :solved_mode_count],
         # res_col => (x -> [extrema(x)]) => [:solved_min, :solved_max],
-        res_col => (x -> x |> extrema |> vcat ) => [:solved_min, :solved_max],
+        res_col => (x -> x |> extrema |> vcat) => [:solved_min, :solved_max],
         res_col => Base.Fix2(calc_consecutive, [1]) => [:solved_consecutive, :solved_consecutive_start, :solved_consecutive_end],
         res_col => Base.Fix1(calc_rolling_mean, 3) => [:solved_mo3_last, :solved_mo3_best],
         res_col => Base.Fix1(calc_rolling_mean, 5) => [:solved_mo5_last, :solved_mo5_best],
@@ -182,7 +182,7 @@ function stats_round_result(df, id_col)
         rdf,
         DataFrames.combine(
             DataFrames.groupby(filter(:best => >(0), df), id_col),
-            :best => (x -> x |> extrema |> vcat ) => [:best, :best_max],
+            :best => (x -> x |> extrema |> vcat) => [:best, :best_max],
             DataFrames.nrow => :best_count,
             :best => nunique => :best_nunique,
             :best => DataFrames.mean => :best_mean,
@@ -214,7 +214,7 @@ function stats_round_result(df, id_col)
                 ),
                 id_col,
             ),
-            :average_real => (x -> x |> extrema |> vcat ) => [:average, :average_max],
+            :average_real => (x -> x |> extrema |> vcat) => [:average, :average_max],
             DataFrames.nrow => :average_count,
             :average => nunique => :average_nunique,
             :average_real => DataFrames.mean => :average_mean,
@@ -308,31 +308,31 @@ end
 
 
 function __init__()
-    s = ArgParse.ArgParseSettings(commands_are_required = false)
-    @ArgParse.add_arg_table! s begin
+    s = ArgParse.ArgParseSettings(commands_are_required=false)
+    ArgParse.@add_arg_table! s begin
         "source"
-            required = true
+        required = true
         "person", "P"
-            help = "print some persons"
-            action = :command
+        help = "print some persons"
+        action = :command
         "topk", "K"
-            help = "print topk"
-            action = :command
+        help = "print topk"
+        action = :command
     end
 
-    @ArgParse.add_arg_table! s["person"] begin
+    ArgParse.@add_arg_table! s["person"] begin
         "ids"
-            nargs = '*'
-            action = "store_arg"
+        nargs = '*'
+        action = "store_arg"
     end
 
-    @ArgParse.add_arg_table! s["topk"] begin
+    ArgParse.@add_arg_table! s["topk"] begin
         "col"
         "--k"
-            default = 10
-            arg_type = Int
+        default = 10
+        arg_type = Int
         "--country"
-            default = missing
+        default = missing
     end
     parsed_args = ArgParse.parse_args(s)
 
@@ -365,7 +365,7 @@ function __init__()
                 :id => :personId, :name => :personName
             ),
             df,
-            on = :personId
+            on=:personId
         )
     else
         df = DataFrames.rightjoin(
@@ -378,7 +378,7 @@ function __init__()
                 :country_id => :countryId
             ),
             df,
-            on = :personId
+            on=:personId
         )
     end
     desc_cols = [
@@ -388,22 +388,22 @@ function __init__()
         :average_attempts, :average_count, :average_nunique, :average_mode_count, :average_consecutive,
         :gold, :silver, :bronze
     ]
-    asc_cols = filter(x->(x ∉ map(String, desc_cols)), all_cols)
+    asc_cols = filter(x -> (x ∉ map(String, desc_cols)), all_cols)
     DataFrames.transform!(
         df,
-        map(x->(x=>StatsBase.competerank=>Symbol("$x" * "_rank")), asc_cols),
-        map(x->(x=>(y->StatsBase.competerank(y, rev=true))=>Symbol("$x" * "_rank")), desc_cols),
+        map(x -> (x => StatsBase.competerank => Symbol("$x" * "_rank")), asc_cols),
+        map(x -> (x => (y -> StatsBase.competerank(y, rev=true)) => Symbol("$x" * "_rank")), desc_cols),
     )
     df = DataFrames.transform!(
         DataFrames.groupby(df, :countryId),
-        map(x->(x=>StatsBase.competerank=>Symbol("$x" * "_nr")), asc_cols),
-        map(x->(x=>(y->StatsBase.competerank(y, rev=true))=>Symbol("$x" * "_nr")), desc_cols),
+        map(x -> (x => StatsBase.competerank => Symbol("$x" * "_nr")), asc_cols),
+        map(x -> (x => (y -> StatsBase.competerank(y, rev=true)) => Symbol("$x" * "_nr")), desc_cols),
     )
     # println(DataFrames.nrow(df))
     CSV.write("results.csv", df)
-    top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...)->any(vv -> isless(vv, 100), v), df)
+    top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...) -> any(vv -> isless(vv, 100), v), df)
     CSV.write("results.top100.csv", top100_df)
-    china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...)->any(vv -> isless(vv, 30), v), filter(:countryId=>==("China"), df))
+    china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...) -> any(vv -> isless(vv, 30), v), filter(:countryId => ==("China"), df))
     CSV.write("results.china.top30.csv", china_top30_df)
 
     if parsed_args["%COMMAND%"] === "topk"
