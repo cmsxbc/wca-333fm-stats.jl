@@ -1,3 +1,3 @@
 #!/bin/bash
 
-julia --project=. -e 'include("WCAStats.jl")'  -- --profile "$@"
+julia --project=. -e 'include("WCAStats.jl")'  -- --profile --pprof "$@"

@@ -10,6 +10,7 @@ import RollingFunctions
 import Printf
 import ArgParse
 import Profile
+import PProf
 
 
 @enum WCA_VERSION WCA_V1 = 1 WCA_V2 = 2
@@ -421,6 +422,9 @@ function __init__()
         "--profile-out"
         help = "profile output file"
         default = "profile.txt"
+        "--pprof"
+        help = "enable pprof"
+        action = :store_true
     end
     parsed_args = ArgParse.parse_args(s)
 
@@ -435,6 +439,9 @@ function __init__()
             Profile.print(io, format=:flat, sortedby=:count, C=true)
         end
         println("\nProfile data saved to: $(parsed_args["profile-out"])")
+        if parsed_args["pprof"]
+            PProf.pprof()
+        end
     else
         process_data(parsed_args)
     end
