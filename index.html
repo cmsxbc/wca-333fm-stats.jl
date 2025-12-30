@@ -450,7 +450,7 @@
             </div>
             <div class="control-group">
                 <label for="searchInput">搜索:</label>
-                <input type="text" id="searchInput" placeholder="输入姓名搜索...">
+                <input type="text" id="searchInput" placeholder="输入姓名或ID搜索...">
             </div>
             <div class="control-group">
                 <label>
@@ -1198,7 +1198,8 @@
             const searchTerm = document.getElementById('searchInput').value.toLowerCase();
             filteredData = allData.filter(row => {
                 const name = (row.personName || '').toLowerCase();
-                return name.includes(searchTerm);
+                const id = (row.personId || '').toLowerCase();
+                return name.includes(searchTerm) || id.includes(searchTerm);
             });
             currentPage = 1;
             updateStats();
