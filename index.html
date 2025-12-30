@@ -407,6 +407,102 @@
             color: #e74c3c;
         }
 
+        .custom-select {
+            position: relative;
+            display: inline-block;
+            width: 80px;
+        }
+
+        .custom-select-button {
+            width: 100%;
+            padding: 10px 15px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+            cursor: pointer;
+            text-align: left;
+            transition: all 0.3s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .custom-select-button:hover {
+            border-color: #667eea;
+        }
+
+        .custom-select-button::after {
+            content: '▼';
+            font-size: 0.7em;
+            opacity: 0.5;
+            transition: transform 0.3s;
+        }
+
+        .custom-select-button.open::after {
+            transform: rotate(180deg);
+        }
+
+        .custom-select-dropdown {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            margin-top: 5px;
+            background: white;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            z-index: 1000;
+            min-width: 100%;
+            display: none;
+            overflow: hidden;
+        }
+
+        .custom-select-dropdown.show {
+            display: block;
+        }
+
+        .custom-select-option {
+            padding: 10px 15px;
+            cursor: pointer;
+            transition: background 0.2s;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .custom-select-option:last-child {
+            border-bottom: none;
+        }
+
+        .custom-select-option:hover {
+            background: #f5f5f5;
+        }
+
+        .custom-select-option.selected {
+            background: #667eea;
+            color: white;
+        }
+
+        .custom-select-input-wrapper {
+            padding: 10px 15px;
+            border-top: 2px solid #667eea;
+            background: #f8f9fa;
+        }
+
+        .custom-select-input-wrapper input {
+            width: 100%;
+            padding: 8px 10px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        .custom-select-input-wrapper input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
         @media (max-width: 768px) {
             .header h1 {
                 font-size: 1.8em;
@@ -448,16 +544,6 @@
                     <option value="results.csv">完整数据</option>
                 </select>
             </div>
-            <div class="control-group">
-                <label for="searchInput">搜索:</label>
-                <input type="text" id="searchInput" placeholder="输入姓名或ID搜索...">
-            </div>
-            <div class="control-group">
-                <label>
-                    <input type="checkbox" id="showRanks" checked>
-                    显示排名
-                </label>
-            </div>
             <div class="control-group column-selector">
                 <button id="columnSelectorBtn">选择列...</button>
                 <div class="column-selector-panel" id="columnSelectorPanel">
@@ -469,6 +555,33 @@
                         <button id="applyColumnsBtn">应用</button>
                     </div>
                 </div>
+            </div>
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="showRanks" checked>
+                    显示排名
+                </label>
+            </div>
+            <div class="control-group">
+                <label for="itemsPerPageSelect">每页显示:</label>
+                <div class="custom-select" id="itemsPerPageSelect">
+                    <div class="custom-select-button" id="itemsPerPageButton">30</div>
+                    <div class="custom-select-dropdown" id="itemsPerPageDropdown">
+                        <div class="custom-select-option" data-value="10">10</div>
+                        <div class="custom-select-option" data-value="20">20</div>
+                        <div class="custom-select-option selected" data-value="30">30</div>
+                        <div class="custom-select-option" data-value="50">50</div>
+                        <div class="custom-select-option" data-value="100">100</div>
+                        <div class="custom-select-option" data-value="200">200</div>
+                        <div class="custom-select-input-wrapper">
+                            <input type="number" id="itemsPerPageCustom" min="1" max="10000" placeholder="输入自定义数字">
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="control-group">
+                <label for="searchInput">搜索:</label>
+                <input type="text" id="searchInput" placeholder="输入姓名或ID搜索...">
             </div>
         </div>
 
@@ -528,7 +641,7 @@
         let allData = [];
         let filteredData = [];
         let currentPage = 1;
-        const itemsPerPage = 30;
+        let itemsPerPage = 30;
         let sortColumn = 'best'; // 基础列名，实际排序会使用排名列
         let sortOrder = 'asc';
         let allHeaders = [];
@@ -1217,11 +1330,158 @@
             renderTable();
         });
 
+        // 自定义下拉列表功能
+        const itemsPerPageSelect = document.getElementById('itemsPerPageSelect');
+        const itemsPerPageButton = document.getElementById('itemsPerPageButton');
+        const itemsPerPageDropdown = document.getElementById('itemsPerPageDropdown');
+        const itemsPerPageCustom = document.getElementById('itemsPerPageCustom');
+        const itemsPerPageOptions = itemsPerPageDropdown.querySelectorAll('.custom-select-option');
+        const presetValues = ['10', '20', '30', '50', '100', '200'];
+        
+        // 更新每页显示数量的通用函数
+        function updateItemsPerPage(value) {
+            itemsPerPage = value;
+            localStorage.setItem('itemsPerPage', itemsPerPage);
+            currentPage = 1;
+            renderTable();
+        }
+        
+        // 更新按钮显示和选中状态
+        function updateSelectDisplay(value) {
+            itemsPerPageButton.textContent = value;
+            // 更新选项的选中状态
+            itemsPerPageOptions.forEach(option => {
+                if (option.dataset.value === value.toString()) {
+                    option.classList.add('selected');
+                } else {
+                    option.classList.remove('selected');
+                }
+            });
+        }
+        
+        // 关闭下拉列表
+        function closeDropdown() {
+            itemsPerPageDropdown.classList.remove('show');
+            itemsPerPageButton.classList.remove('open');
+        }
+        
+        // 打开下拉列表
+        function openDropdown() {
+            itemsPerPageDropdown.classList.add('show');
+            itemsPerPageButton.classList.add('open');
+        }
+        
+        // 按钮点击事件
+        itemsPerPageButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (itemsPerPageDropdown.classList.contains('show')) {
+                closeDropdown();
+            } else {
+                openDropdown();
+            }
+        });
+        
+        // 选项点击事件
+        itemsPerPageOptions.forEach(option => {
+            option.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const value = parseInt(option.dataset.value);
+                itemsPerPageCustom.value = '';
+                updateSelectDisplay(value);
+                updateItemsPerPage(value);
+                closeDropdown();
+            });
+        });
+        
+        // 输入框变化事件
+        itemsPerPageCustom.addEventListener('input', (e) => {
+            const inputValue = e.target.value;
+            if (inputValue === '') {
+                return;
+            }
+            
+            let value = parseInt(inputValue);
+            if (!isNaN(value) && value >= 1 && value <= 10000) {
+                // 检查是否在预设值中
+                if (presetValues.includes(value.toString())) {
+                    // 如果在预设值中，更新选中状态
+                    updateSelectDisplay(value);
+                } else {
+                    // 如果不在预设值中，清除所有选中状态，更新按钮显示
+                    itemsPerPageOptions.forEach(opt => opt.classList.remove('selected'));
+                    itemsPerPageButton.textContent = value;
+                }
+                updateItemsPerPage(value);
+            }
+        });
+        
+        // 输入框失去焦点时的验证
+        itemsPerPageCustom.addEventListener('blur', (e) => {
+            let value = parseInt(e.target.value);
+            if (isNaN(value) || value < 1) {
+                // 无效值，恢复为当前值或默认值
+                value = itemsPerPage || 30;
+                e.target.value = '';
+                updateSelectDisplay(value);
+                updateItemsPerPage(value);
+            } else if (value > 10000) {
+                value = 10000;
+                e.target.value = value;
+                if (!presetValues.includes(value.toString())) {
+                    itemsPerPageOptions.forEach(opt => opt.classList.remove('selected'));
+                    itemsPerPageButton.textContent = value;
+                } else {
+                    updateSelectDisplay(value);
+                }
+                updateItemsPerPage(value);
+            }
+        });
+        
+        // 点击外部关闭下拉列表
+        document.addEventListener('click', (e) => {
+            if (!itemsPerPageSelect.contains(e.target)) {
+                closeDropdown();
+            }
+        });
+        
+        // 输入框回车键确认
+        itemsPerPageCustom.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                itemsPerPageCustom.blur();
+                closeDropdown();
+            }
+        });
+
         // 加载显示排名设置
         const savedShowRanks = localStorage.getItem('showRanks');
         if (savedShowRanks !== null) {
             showRanks = savedShowRanks === 'true';
             document.getElementById('showRanks').checked = showRanks;
+        }
+
+        // 加载每页显示数量设置
+        const savedItemsPerPage = localStorage.getItem('itemsPerPage');
+        if (savedItemsPerPage !== null) {
+            let value = parseInt(savedItemsPerPage);
+            // 验证保存的值是否有效
+            if (isNaN(value) || value < 1) {
+                value = 30;
+            } else if (value > 10000) {
+                value = 10000;
+            }
+            itemsPerPage = value;
+            
+            // 检查值是否在预设选项中
+            if (presetValues.includes(value.toString())) {
+                updateSelectDisplay(value);
+                itemsPerPageCustom.value = '';
+            } else {
+                // 自定义值，清除选中状态，更新按钮显示，输入框显示该值
+                itemsPerPageOptions.forEach(opt => opt.classList.remove('selected'));
+                itemsPerPageButton.textContent = value;
+                itemsPerPageCustom.value = value;
+            }
         }
 
         document.getElementById('searchInput').addEventListener('input', filterData);
