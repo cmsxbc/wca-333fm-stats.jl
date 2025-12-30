@@ -20,7 +20,7 @@
         }
 
         .container {
-            max-width: 1400px;
+            max-width:3200pxx;
             margin: 0 auto;
             background: white;
             border-radius: 20px;
@@ -236,11 +236,6 @@
             transition: transform 0.3s;
         }
 
-        .stat-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-        }
-
         .stat-card .value {
             font-size: 2em;
             font-weight: bold;
@@ -410,7 +405,7 @@
         .custom-select {
             position: relative;
             display: inline-block;
-            width: 80px;
+            width: 120px;
         }
 
         .custom-select-button {
@@ -483,7 +478,7 @@
         }
 
         .custom-select-input-wrapper {
-            padding: 10px 15px;
+            padding: 2px 3px;
             border-top: 2px solid #667eea;
             background: #f8f9fa;
         }
@@ -563,7 +558,7 @@
                 </label>
             </div>
             <div class="control-group">
-                <label for="itemsPerPageSelect">每页显示:</label>
+                <label>每页显示:</label>
                 <div class="custom-select" id="itemsPerPageSelect">
                     <div class="custom-select-button" id="itemsPerPageButton">30</div>
                     <div class="custom-select-dropdown" id="itemsPerPageDropdown">
@@ -580,7 +575,6 @@
                 </div>
             </div>
             <div class="control-group">
-                <label for="searchInput">搜索:</label>
                 <input type="text" id="searchInput" placeholder="输入姓名或ID搜索...">
             </div>
         </div>
@@ -671,8 +665,8 @@
         // isInteger为true时，显示为整数格式
         const columnDefinitions = {
             '基本信息': [
-                { base: 'personName', label: '姓名', hasRank: false, isInteger: false },
                 { base: 'personId', label: 'ID', hasRank: false, isInteger: false },
+                { base: 'personName', label: '姓名', hasRank: false, isInteger: false },
                 { base: 'countryId', label: '国家', hasRank: false, isInteger: false },
                 { base: 'gender', label: '性别', hasRank: false, isInteger: false }
             ],
@@ -1266,7 +1260,18 @@
                             } else {
                                 baseValue = formatNumber(baseValue, isIntegerCol);
                             }
+                        } else if (baseCol === 'gender') {
+                            if (baseValue === 'm') {
+                                baseValue = '男'
+                            } else if (baseValue === 'f') {
+                                baseValue = '女'
+                            } else if (baseValue === 'o') {
+                                baseValue = '其他'
+                            } else {
+                                baseValue = `未知(${baseValue})`
+                            }
                         }
+
                         td.textContent = baseValue;
                     }
 
