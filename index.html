@@ -79,6 +79,19 @@
             cursor: pointer;
         }
 
+        .control-group label input[type="checkbox"] {
+            margin-right: 8px;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .control-group label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+        }
+
         .control-group select:focus,
         .control-group input:focus {
             outline: none;
@@ -310,6 +323,17 @@
             white-space: nowrap;
         }
 
+        td .rank-info {
+            font-size: 0.85em;
+            color: #888;
+            margin-left: 5px;
+        }
+
+        td .rank-info .rank-value {
+            color: #667eea;
+            font-weight: 600;
+        }
+
         .number {
             text-align: right;
             font-variant-numeric: tabular-nums;
@@ -427,9 +451,6 @@
             <div class="control-group">
                 <label for="sortColumn">排序字段:</label>
                 <select id="sortColumn">
-                    <option value="best_rank">最佳成绩排名</option>
-                    <option value="average_rank">平均成绩排名</option>
-                    <option value="solved_mean_rank">单次平均排名</option>
                     <option value="best">最佳成绩</option>
                     <option value="average">平均成绩</option>
                     <option value="solved_mean">单次平均</option>
@@ -447,6 +468,12 @@
             <div class="control-group">
                 <label for="searchInput">搜索:</label>
                 <input type="text" id="searchInput" placeholder="输入姓名搜索...">
+            </div>
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="showRanks" checked>
+                    显示排名
+                </label>
             </div>
             <div class="control-group column-selector">
                 <button id="columnSelectorBtn">选择列...</button>
@@ -519,12 +546,13 @@
         let filteredData = [];
         let currentPage = 1;
         const itemsPerPage = 30;
-        let sortColumn = 'best_rank';
+        let sortColumn = 'best'; // 基础列名，实际排序会使用排名列
         let sortOrder = 'asc';
         let allHeaders = [];
         let visibleColumns = [];
         let currentFile = 'results.china.top30.csv';
-        
+        let showRanks = true; // 全局开关：是否显示排名
+
         // 文件配置
         const fileConfigs = {
             'results.china.top30.csv': {
@@ -540,256 +568,143 @@
                 description: '完整统计数据（所有选手）'
             }
         };
-        
-        // 列定义（按类别组织）
+
+        // 列定义（按类别组织，绑定原始列、排名列、国家排名列）
+        // 格式: { base: '原始列名', label: '显示名称', hasRank: true/false, isInteger: true/false }
+        // hasRank为true时，会自动查找 base + '_rank' 和 base + '_nr'
+        // isInteger为true时，显示为整数格式
         const columnDefinitions = {
             '基本信息': [
-                { key: 'personName', label: '姓名' },
-                { key: 'personId', label: 'ID' },
-                { key: 'countryId', label: '国家' },
-                { key: 'gender', label: '性别' }
+                { base: 'personName', label: '姓名', hasRank: false, isInteger: false },
+                { base: 'personId', label: 'ID', hasRank: false, isInteger: false },
+                { base: 'countryId', label: '国家', hasRank: false, isInteger: false },
+                { base: 'gender', label: '性别', hasRank: false, isInteger: false }
             ],
             '比赛统计': [
-                { key: 'competitions', label: '比赛次数' },
-                { key: 'rounds', label: '轮次' },
-                { key: 'chances', label: '机会数' },
-                { key: 'attempts', label: '尝试次数' }
+                { base: 'competitions', label: '比赛次数', hasRank: true, isInteger: true },
+                { base: 'rounds', label: '轮次', hasRank: true, isInteger: true },
+                { base: 'chances', label: '机会数', hasRank: true, isInteger: true },
+                { base: 'attempts', label: '尝试次数', hasRank: true, isInteger: true }
             ],
             '最佳成绩': [
-                { key: 'best', label: '最佳' },
-                { key: 'best_max', label: '最佳最大值' },
-                { key: 'best_count', label: '最佳次数' },
-                { key: 'best_nunique', label: '最佳唯一值数' },
-                { key: 'best_mean', label: '最佳平均' },
-                { key: 'best_std', label: '最佳标准差' },
-                { key: 'best_avg', label: '最佳平均(去极值)' },
-                { key: 'best_median', label: '最佳中位数' },
-                { key: 'best_mode', label: '最佳众数' },
-                { key: 'best_mode_count', label: '最佳众数次数' },
-                { key: 'best_consecutive', label: '最佳连续次数' },
-                { key: 'best_consecutive_start', label: '最佳连续开始' },
-                { key: 'best_consecutive_end', label: '最佳连续结束' }
+                { base: 'best', label: '最佳', hasRank: true, isInteger: true },
+                { base: 'best_max', label: '最佳最大值', hasRank: true, isInteger: true },
+                { base: 'best_count', label: '最佳次数', hasRank: true, isInteger: true },
+                { base: 'best_nunique', label: '最佳唯一值数', hasRank: true, isInteger: true },
+                { base: 'best_mean', label: '最佳平均', hasRank: true, isInteger: false },
+                { base: 'best_std', label: '最佳标准差', hasRank: true, isInteger: false },
+                { base: 'best_avg', label: '最佳平均(去极值)', hasRank: true, isInteger: false },
+                { base: 'best_median', label: '最佳中位数', hasRank: true, isInteger: false },
+                { base: 'best_mode', label: '最佳众数', hasRank: true, isInteger: true },
+                { base: 'best_mode_count', label: '最佳众数次数', hasRank: true, isInteger: true },
+                { base: 'best_consecutive', label: '最佳连续次数', hasRank: true, isInteger: true },
+                { base: 'best_consecutive_start', label: '最佳连续开始', hasRank: true, isInteger: true },
+                { base: 'best_consecutive_end', label: '最佳连续结束', hasRank: true, isInteger: true }
             ],
             '平均成绩': [
-                { key: 'average', label: '平均' },
-                { key: 'average_max', label: '平均最大值' },
-                { key: 'average_count', label: '平均次数' },
-                { key: 'average_nunique', label: '平均唯一值数' },
-                { key: 'average_mean', label: '平均均值' },
-                { key: 'average_std', label: '平均标准差' },
-                { key: 'average_avg', label: '平均(去极值)' },
-                { key: 'average_median', label: '平均中位数' },
-                { key: 'average_mode', label: '平均众数' },
-                { key: 'average_mode_count', label: '平均众数次数' },
-                { key: 'average_consecutive', label: '平均连续次数' },
-                { key: 'average_consecutive_start', label: '平均连续开始' },
-                { key: 'average_consecutive_end', label: '平均连续结束' },
-                { key: 'average_attempts', label: '平均尝试次数' }
+                { base: 'average', label: '平均', hasRank: true, isInteger: false },
+                { base: 'average_max', label: '平均最大值', hasRank: true, isInteger: false },
+                { base: 'average_count', label: '平均次数', hasRank: true, isInteger: true },
+                { base: 'average_nunique', label: '平均唯一值数', hasRank: true, isInteger: true },
+                { base: 'average_mean', label: '平均均值', hasRank: true, isInteger: false },
+                { base: 'average_std', label: '平均标准差', hasRank: true, isInteger: false },
+                { base: 'average_avg', label: '平均(去极值)', hasRank: true, isInteger: false },
+                { base: 'average_median', label: '平均中位数', hasRank: true, isInteger: false },
+                { base: 'average_mode', label: '平均众数', hasRank: true, isInteger: false },
+                { base: 'average_mode_count', label: '平均众数次数', hasRank: true, isInteger: true },
+                { base: 'average_consecutive', label: '平均连续次数', hasRank: true, isInteger: true },
+                { base: 'average_consecutive_start', label: '平均连续开始', hasRank: true, isInteger: false },
+                { base: 'average_consecutive_end', label: '平均连续结束', hasRank: true, isInteger: false },
+                { base: 'average_attempts', label: '平均尝试次数', hasRank: true, isInteger: true }
             ],
             '单次成绩': [
-                { key: 'solved_count', label: '成功次数' },
-                { key: 'solved_nunique', label: '成功唯一值数' },
-                { key: 'solved_mean', label: '单次平均' },
-                { key: 'solved_std', label: '单次标准差' },
-                { key: 'solved_avg', label: '单次平均(去极值)' },
-                { key: 'solved_median', label: '单次中位数' },
-                { key: 'solved_mode', label: '单次众数' },
-                { key: 'solved_mode_count', label: '单次众数次数' },
-                { key: 'solved_min', label: '单次最小值' },
-                { key: 'solved_max', label: '单次最大值' },
-                { key: 'solved_consecutive', label: '单次连续次数' },
-                { key: 'solved_consecutive_start', label: '单次连续开始' },
-                { key: 'solved_consecutive_end', label: '单次连续结束' }
+                { base: 'solved_count', label: '成功次数', hasRank: true, isInteger: true },
+                { base: 'solved_nunique', label: '成功唯一值数', hasRank: true, isInteger: true },
+                { base: 'solved_mean', label: '单次平均', hasRank: true, isInteger: false },
+                { base: 'solved_std', label: '单次标准差', hasRank: true, isInteger: false },
+                { base: 'solved_avg', label: '单次平均(去极值)', hasRank: true, isInteger: false },
+                { base: 'solved_median', label: '单次中位数', hasRank: true, isInteger: false },
+                { base: 'solved_mode', label: '单次众数', hasRank: true, isInteger: true },
+                { base: 'solved_mode_count', label: '单次众数次数', hasRank: true, isInteger: true },
+                { base: 'solved_min', label: '单次最小值', hasRank: true, isInteger: true },
+                { base: 'solved_max', label: '单次最大值', hasRank: true, isInteger: true },
+                { base: 'solved_consecutive', label: '单次连续次数', hasRank: true, isInteger: true },
+                { base: 'solved_consecutive_start', label: '单次连续开始', hasRank: true, isInteger: true },
+                { base: 'solved_consecutive_end', label: '单次连续结束', hasRank: true, isInteger: true }
             ],
             '滚动平均 - MO': [
-                { key: 'solved_mo3_last', label: 'MO3 最后' },
-                { key: 'solved_mo3_best', label: 'MO3 最佳' },
-                { key: 'solved_mo5_last', label: 'MO5 最后' },
-                { key: 'solved_mo5_best', label: 'MO5 最佳' },
-                { key: 'solved_mo12_last', label: 'MO12 最后' },
-                { key: 'solved_mo12_best', label: 'MO12 最佳' },
-                { key: 'solved_mo50_last', label: 'MO50 最后' },
-                { key: 'solved_mo50_best', label: 'MO50 最佳' },
-                { key: 'solved_mo100_last', label: 'MO100 最后' },
-                { key: 'solved_mo100_best', label: 'MO100 最佳' }
+                { base: 'solved_mo3_last', label: 'MO3 最新', hasRank: true, isInteger: false },
+                { base: 'solved_mo3_best', label: 'MO3 最佳', hasRank: true, isInteger: false },
+                { base: 'solved_mo5_last', label: 'MO5 最新', hasRank: true, isInteger: false },
+                { base: 'solved_mo5_best', label: 'MO5 最佳', hasRank: true, isInteger: false },
+                { base: 'solved_mo12_last', label: 'MO12 最新', hasRank: true, isInteger: false },
+                { base: 'solved_mo12_best', label: 'MO12 最佳', hasRank: true, isInteger: false },
+                { base: 'solved_mo50_last', label: 'MO50 最新', hasRank: true, isInteger: false },
+                { base: 'solved_mo50_best', label: 'MO50 最佳', hasRank: true, isInteger: false },
+                { base: 'solved_mo100_last', label: 'MO100 最新', hasRank: true, isInteger: false },
+                { base: 'solved_mo100_best', label: 'MO100 最佳', hasRank: true, isInteger: false }
             ],
             '滚动平均 - AO': [
-                { key: 'solved_ao5_last', label: 'AO5 最后' },
-                { key: 'solved_ao5_best', label: 'AO5 最佳' },
-                { key: 'solved_ao12_last', label: 'AO12 最后' },
-                { key: 'solved_ao12_best', label: 'AO12 最佳' },
-                { key: 'solved_ao50_last', label: 'AO50 最后' },
-                { key: 'solved_ao50_best', label: 'AO50 最佳' },
-                { key: 'solved_ao100_last', label: 'AO100 最后' },
-                { key: 'solved_ao100_best', label: 'AO100 最佳' }
+                { base: 'solved_ao5_last', label: 'AO5 最新', hasRank: true, isInteger: false },
+                { base: 'solved_ao5_best', label: 'AO5 最佳', hasRank: true, isInteger: false },
+                { base: 'solved_ao12_last', label: 'AO12 最新', hasRank: true, isInteger: false },
+                { base: 'solved_ao12_best', label: 'AO12 最佳', hasRank: true, isInteger: false },
+                { base: 'solved_ao50_last', label: 'AO50 最新', hasRank: true, isInteger: false },
+                { base: 'solved_ao50_best', label: 'AO50 最佳', hasRank: true, isInteger: false },
+                { base: 'solved_ao100_last', label: 'AO100 最新', hasRank: true, isInteger: false },
+                { base: 'solved_ao100_best', label: 'AO100 最佳', hasRank: true, isInteger: false }
             ],
             '奖牌': [
-                { key: 'gold', label: '🥇 金牌' },
-                { key: 'silver', label: '🥈 银牌' },
-                { key: 'bronze', label: '🥉 铜牌' }
-            ],
-            '全球排名': [
-                { key: 'best_rank', label: '最佳排名' },
-                { key: 'best_max_rank', label: '最佳最大排名' },
-                { key: 'best_count_rank', label: '最佳次数排名' },
-                { key: 'best_nunique_rank', label: '最佳唯一值数排名' },
-                { key: 'best_mean_rank', label: '最佳平均排名' },
-                { key: 'best_std_rank', label: '最佳标准差排名' },
-                { key: 'best_avg_rank', label: '最佳平均(去极值)排名' },
-                { key: 'best_median_rank', label: '最佳中位数排名' },
-                { key: 'best_mode_rank', label: '最佳众数排名' },
-                { key: 'best_mode_count_rank', label: '最佳众数次数排名' },
-                { key: 'best_consecutive_rank', label: '最佳连续次数排名' },
-                { key: 'best_consecutive_start_rank', label: '最佳连续开始排名' },
-                { key: 'best_consecutive_end_rank', label: '最佳连续结束排名' },
-                { key: 'average_rank', label: '平均排名' },
-                { key: 'average_max_rank', label: '平均最大排名' },
-                { key: 'average_count_rank', label: '平均次数排名' },
-                { key: 'average_nunique_rank', label: '平均唯一值数排名' },
-                { key: 'average_mean_rank', label: '平均均值排名' },
-                { key: 'average_std_rank', label: '平均标准差排名' },
-                { key: 'average_avg_rank', label: '平均(去极值)排名' },
-                { key: 'average_median_rank', label: '平均中位数排名' },
-                { key: 'average_mode_rank', label: '平均众数排名' },
-                { key: 'average_mode_count_rank', label: '平均众数次数排名' },
-                { key: 'average_consecutive_rank', label: '平均连续次数排名' },
-                { key: 'average_consecutive_start_rank', label: '平均连续开始排名' },
-                { key: 'average_consecutive_end_rank', label: '平均连续结束排名' },
-                { key: 'average_attempts_rank', label: '平均尝试次数排名' },
-                { key: 'solved_count_rank', label: '成功次数排名' },
-                { key: 'solved_nunique_rank', label: '成功唯一值数排名' },
-                { key: 'solved_mean_rank', label: '单次平均排名' },
-                { key: 'solved_std_rank', label: '单次标准差排名' },
-                { key: 'solved_avg_rank', label: '单次平均(去极值)排名' },
-                { key: 'solved_median_rank', label: '单次中位数排名' },
-                { key: 'solved_mode_rank', label: '单次众数排名' },
-                { key: 'solved_mode_count_rank', label: '单次众数次数排名' },
-                { key: 'solved_min_rank', label: '单次最小排名' },
-                { key: 'solved_max_rank', label: '单次最大排名' },
-                { key: 'solved_consecutive_rank', label: '单次连续次数排名' },
-                { key: 'solved_consecutive_start_rank', label: '单次连续开始排名' },
-                { key: 'solved_consecutive_end_rank', label: '单次连续结束排名' },
-                { key: 'solved_mo3_last_rank', label: 'MO3 最后排名' },
-                { key: 'solved_mo3_best_rank', label: 'MO3 最佳排名' },
-                { key: 'solved_mo5_last_rank', label: 'MO5 最后排名' },
-                { key: 'solved_mo5_best_rank', label: 'MO5 最佳排名' },
-                { key: 'solved_mo12_last_rank', label: 'MO12 最后排名' },
-                { key: 'solved_mo12_best_rank', label: 'MO12 最佳排名' },
-                { key: 'solved_mo50_last_rank', label: 'MO50 最后排名' },
-                { key: 'solved_mo50_best_rank', label: 'MO50 最佳排名' },
-                { key: 'solved_mo100_last_rank', label: 'MO100 最后排名' },
-                { key: 'solved_mo100_best_rank', label: 'MO100 最佳排名' },
-                { key: 'solved_ao5_last_rank', label: 'AO5 最后排名' },
-                { key: 'solved_ao5_best_rank', label: 'AO5 最佳排名' },
-                { key: 'solved_ao12_last_rank', label: 'AO12 最后排名' },
-                { key: 'solved_ao12_best_rank', label: 'AO12 最佳排名' },
-                { key: 'solved_ao50_last_rank', label: 'AO50 最后排名' },
-                { key: 'solved_ao50_best_rank', label: 'AO50 最佳排名' },
-                { key: 'solved_ao100_last_rank', label: 'AO100 最后排名' },
-                { key: 'solved_ao100_best_rank', label: 'AO100 最佳排名' },
-                { key: 'avg_item_3rd_min_rank', label: '平均第三项最小排名' },
-                { key: 'avg_item_3rd_max_rank', label: '平均第三项最大排名' },
-                { key: 'avg_item_2nd_min_rank', label: '平均第二项最小排名' },
-                { key: 'avg_item_2nd_max_rank', label: '平均第二项最大排名' },
-                { key: 'competitions_rank', label: '比赛次数排名' },
-                { key: 'rounds_rank', label: '轮次排名' },
-                { key: 'chances_rank', label: '机会数排名' },
-                { key: 'attempts_rank', label: '尝试次数排名' },
-                { key: 'gold_rank', label: '金牌排名' },
-                { key: 'silver_rank', label: '银牌排名' },
-                { key: 'bronze_rank', label: '铜牌排名' }
-            ],
-            '国家排名': [
-                { key: 'best_nr', label: '最佳国家排名' },
-                { key: 'best_max_nr', label: '最佳最大国家排名' },
-                { key: 'best_count_nr', label: '最佳次数国家排名' },
-                { key: 'best_nunique_nr', label: '最佳唯一值数国家排名' },
-                { key: 'best_mean_nr', label: '最佳平均国家排名' },
-                { key: 'best_std_nr', label: '最佳标准差国家排名' },
-                { key: 'best_avg_nr', label: '最佳平均(去极值)国家排名' },
-                { key: 'best_median_nr', label: '最佳中位数国家排名' },
-                { key: 'best_mode_nr', label: '最佳众数国家排名' },
-                { key: 'best_mode_count_nr', label: '最佳众数次数国家排名' },
-                { key: 'best_consecutive_nr', label: '最佳连续次数国家排名' },
-                { key: 'best_consecutive_start_nr', label: '最佳连续开始国家排名' },
-                { key: 'best_consecutive_end_nr', label: '最佳连续结束国家排名' },
-                { key: 'average_nr', label: '平均国家排名' },
-                { key: 'average_max_nr', label: '平均最大国家排名' },
-                { key: 'average_count_nr', label: '平均次数国家排名' },
-                { key: 'average_nunique_nr', label: '平均唯一值数国家排名' },
-                { key: 'average_mean_nr', label: '平均均值国家排名' },
-                { key: 'average_std_nr', label: '平均标准差国家排名' },
-                { key: 'average_avg_nr', label: '平均(去极值)国家排名' },
-                { key: 'average_median_nr', label: '平均中位数国家排名' },
-                { key: 'average_mode_nr', label: '平均众数国家排名' },
-                { key: 'average_mode_count_nr', label: '平均众数次数国家排名' },
-                { key: 'average_consecutive_nr', label: '平均连续次数国家排名' },
-                { key: 'average_consecutive_start_nr', label: '平均连续开始国家排名' },
-                { key: 'average_consecutive_end_nr', label: '平均连续结束国家排名' },
-                { key: 'average_attempts_nr', label: '平均尝试次数国家排名' },
-                { key: 'solved_count_nr', label: '成功次数国家排名' },
-                { key: 'solved_nunique_nr', label: '成功唯一值数国家排名' },
-                { key: 'solved_mean_nr', label: '单次平均国家排名' },
-                { key: 'solved_std_nr', label: '单次标准差国家排名' },
-                { key: 'solved_avg_nr', label: '单次平均(去极值)国家排名' },
-                { key: 'solved_median_nr', label: '单次中位数国家排名' },
-                { key: 'solved_mode_nr', label: '单次众数国家排名' },
-                { key: 'solved_mode_count_nr', label: '单次众数次数国家排名' },
-                { key: 'solved_min_nr', label: '单次最小国家排名' },
-                { key: 'solved_max_nr', label: '单次最大国家排名' },
-                { key: 'solved_consecutive_nr', label: '单次连续次数国家排名' },
-                { key: 'solved_consecutive_start_nr', label: '单次连续开始国家排名' },
-                { key: 'solved_consecutive_end_nr', label: '单次连续结束国家排名' },
-                { key: 'solved_mo3_last_nr', label: 'MO3 最后国家排名' },
-                { key: 'solved_mo3_best_nr', label: 'MO3 最佳国家排名' },
-                { key: 'solved_mo5_last_nr', label: 'MO5 最后国家排名' },
-                { key: 'solved_mo5_best_nr', label: 'MO5 最佳国家排名' },
-                { key: 'solved_mo12_last_nr', label: 'MO12 最后国家排名' },
-                { key: 'solved_mo12_best_nr', label: 'MO12 最佳国家排名' },
-                { key: 'solved_mo50_last_nr', label: 'MO50 最后国家排名' },
-                { key: 'solved_mo50_best_nr', label: 'MO50 最佳国家排名' },
-                { key: 'solved_mo100_last_nr', label: 'MO100 最后国家排名' },
-                { key: 'solved_mo100_best_nr', label: 'MO100 最佳国家排名' },
-                { key: 'solved_ao5_last_nr', label: 'AO5 最后国家排名' },
-                { key: 'solved_ao5_best_nr', label: 'AO5 最佳国家排名' },
-                { key: 'solved_ao12_last_nr', label: 'AO12 最后国家排名' },
-                { key: 'solved_ao12_best_nr', label: 'AO12 最佳国家排名' },
-                { key: 'solved_ao50_last_nr', label: 'AO50 最后国家排名' },
-                { key: 'solved_ao50_best_nr', label: 'AO50 最佳国家排名' },
-                { key: 'solved_ao100_last_nr', label: 'AO100 最后国家排名' },
-                { key: 'solved_ao100_best_nr', label: 'AO100 最佳国家排名' },
-                { key: 'avg_item_3rd_min_nr', label: '平均第三项最小国家排名' },
-                { key: 'avg_item_3rd_max_nr', label: '平均第三项最大国家排名' },
-                { key: 'avg_item_2nd_min_nr', label: '平均第二项最小国家排名' },
-                { key: 'avg_item_2nd_max_nr', label: '平均第二项最大国家排名' },
-                { key: 'competitions_nr', label: '比赛次数国家排名' },
-                { key: 'rounds_nr', label: '轮次国家排名' },
-                { key: 'chances_nr', label: '机会数国家排名' },
-                { key: 'attempts_nr', label: '尝试次数国家排名' },
-                { key: 'gold_nr', label: '金牌国家排名' },
-                { key: 'silver_nr', label: '银牌国家排名' },
-                { key: 'bronze_nr', label: '铜牌国家排名' }
+                { base: 'gold', label: '🥇 金牌', hasRank: true, isInteger: true },
+                { base: 'silver', label: '🥈 银牌', hasRank: true, isInteger: true },
+                { base: 'bronze', label: '🥉 铜牌', hasRank: true, isInteger: true }
             ],
             '其他': [
-                { key: 'avg_item_3rd_min', label: '平均第三项最小' },
-                { key: 'avg_item_3rd_max', label: '平均第三项最大' },
-                { key: 'avg_item_2nd_min', label: '平均第二项最小' },
-                { key: 'avg_item_2nd_max', label: '平均第二项最大' }
+                { base: 'avg_item_3rd_min', label: '平均第三项最小', hasRank: true, isInteger: true },
+                { base: 'avg_item_3rd_max', label: '平均第三项最大', hasRank: true, isInteger: true },
+                { base: 'avg_item_2nd_min', label: '平均第二项最小', hasRank: true, isInteger: true },
+                { base: 'avg_item_2nd_max', label: '平均第二项最大', hasRank: true, isInteger: true }
             ]
         };
-        
-        // 默认显示的列
+
+        // 默认显示的列（只显示基础列，排名通过开关控制）
         const defaultColumns = [
-            'personName', 'best', 'best_rank', 'average', 'average_rank',
-            'solved_mean', 'solved_mean_rank', 'competitions', 'rounds',
-            'solved_count', 'gold', 'silver', 'bronze'
+            'personName', 'best', 'average', 'solved_mean', 
+            'competitions', 'rounds', 'solved_count', 'gold', 'silver', 'bronze'
         ];
+        
+        // 检查列是否完整（有排名列的数据列必须有三列）
+        function validateColumnGroup(baseCol) {
+            const rankCol = baseCol + '_rank';
+            const nrCol = baseCol + '_nr';
+            const hasBase = allHeaders.includes(baseCol);
+            const hasRank = allHeaders.includes(rankCol);
+            const hasNr = allHeaders.includes(nrCol);
+            
+            if (hasBase && (hasRank || hasNr)) {
+                // 如果有基础列和至少一个排名列，检查是否完整
+                if (hasBase && hasRank && !hasNr) {
+                    console.warn(`警告: 列 ${baseCol} 缺少国家排名列 ${nrCol}`);
+                    return false;
+                }
+                if (hasBase && hasNr && !hasRank) {
+                    console.warn(`警告: 列 ${baseCol} 缺少全球排名列 ${rankCol}`);
+                    return false;
+                }
+                if (hasBase && !hasRank && !hasNr) {
+                    // 没有排名列，这是正常的（如基本信息列）
+                    return true;
+                }
+                return hasBase && hasRank && hasNr;
+            }
+            return true; // 如果基础列都不存在，返回true（会被过滤掉）
+        }
 
         // 初始化列选择器
         function initColumnSelector() {
             const panel = document.getElementById('columnCheckboxes');
             panel.innerHTML = '';
-            
+
             // 从 localStorage 加载保存的列选择（按文件分别保存）
             const savedColumnsKey = `visibleColumns_${currentFile}`;
             const savedColumns = localStorage.getItem(savedColumnsKey);
@@ -801,29 +716,63 @@
                 // 使用默认列，但只包含当前文件中存在的列
                 visibleColumns = defaultColumns.filter(col => allHeaders.includes(col));
             }
-            
+
             // 确保至少有一个列被选中
             if (visibleColumns.length === 0 && allHeaders.length > 0) {
                 visibleColumns = allHeaders.includes('personName') ? ['personName'] : [allHeaders[0]];
             }
+
+            // 检查数据完整性
+            const missingColumns = [];
+            Object.keys(columnDefinitions).forEach(category => {
+                columnDefinitions[category].forEach(col => {
+                    if (col.hasRank && allHeaders.includes(col.base)) {
+                        const rankCol = col.base + '_rank';
+                        const nrCol = col.base + '_nr';
+                        const hasRank = allHeaders.includes(rankCol);
+                        const hasNr = allHeaders.includes(nrCol);
+                        
+                        if (!hasRank || !hasNr) {
+                            const missing = [];
+                            if (!hasRank) missing.push(rankCol);
+                            if (!hasNr) missing.push(nrCol);
+                            missingColumns.push({
+                                base: col.base,
+                                label: col.label,
+                                missing: missing
+                            });
+                        }
+                    }
+                });
+            });
             
+            if (missingColumns.length > 0) {
+                const errorMsg = `数据不完整！以下列缺少排名列：\n\n` +
+                    missingColumns.map(m => `  ${m.label} (${m.base}): 缺少 ${m.missing.join(', ')}`).join('\n') +
+                    `\n\n请检查 CSV 文件。`;
+                console.error('数据完整性检查失败:', errorMsg);
+                const errorDiv = document.getElementById('error');
+                errorDiv.style.display = 'block';
+                errorDiv.textContent = errorMsg;
+            }
+
             // 创建所有列的复选框
             Object.keys(columnDefinitions).forEach(category => {
                 const categoryDiv = document.createElement('div');
                 categoryDiv.className = 'column-category';
-                
+
                 // 创建分组标题容器
                 const headerDiv = document.createElement('div');
                 headerDiv.className = 'column-category-header';
-                
+
                 const h4 = document.createElement('h4');
                 h4.textContent = category;
                 headerDiv.appendChild(h4);
-                
+
                 // 创建分组操作按钮
                 const categoryActions = document.createElement('div');
                 categoryActions.className = 'category-actions';
-                
+
                 const selectAllBtn = document.createElement('button');
                 selectAllBtn.textContent = '全选';
                 selectAllBtn.type = 'button';
@@ -831,7 +780,7 @@
                     const categoryCheckboxes = categoryDiv.querySelectorAll('input[type="checkbox"]');
                     categoryCheckboxes.forEach(cb => cb.checked = true);
                 };
-                
+
                 const selectNoneBtn = document.createElement('button');
                 selectNoneBtn.textContent = '全不选';
                 selectNoneBtn.type = 'button';
@@ -839,93 +788,100 @@
                     const categoryCheckboxes = categoryDiv.querySelectorAll('input[type="checkbox"]');
                     categoryCheckboxes.forEach(cb => cb.checked = false);
                 };
-                
+
                 categoryActions.appendChild(selectAllBtn);
                 categoryActions.appendChild(selectNoneBtn);
                 headerDiv.appendChild(categoryActions);
                 categoryDiv.appendChild(headerDiv);
-                
+
                 const checkboxesDiv = document.createElement('div');
                 checkboxesDiv.className = 'column-checkboxes';
-                
+
                 columnDefinitions[category].forEach(col => {
-                    // 只显示 CSV 中实际存在的列
-                    if (!allHeaders.includes(col.key)) return;
+                    // 只显示 CSV 中实际存在的基础列
+                    if (!allHeaders.includes(col.base)) return;
                     
+                    // 如果有排名列，检查是否完整
+                    if (col.hasRank && !validateColumnGroup(col.base)) {
+                        return; // 跳过不完整的列
+                    }
+
                     const checkboxDiv = document.createElement('div');
                     checkboxDiv.className = 'column-checkbox';
-                    
+
                     const checkbox = document.createElement('input');
                     checkbox.type = 'checkbox';
-                    checkbox.id = `col_${col.key}`;
-                    checkbox.value = col.key;
-                    checkbox.checked = visibleColumns.includes(col.key);
-                    
+                    checkbox.id = `col_${col.base}`;
+                    checkbox.value = col.base;
+                    checkbox.checked = visibleColumns.includes(col.base);
+
                     const label = document.createElement('label');
-                    label.htmlFor = `col_${col.key}`;
+                    label.htmlFor = `col_${col.base}`;
                     label.textContent = col.label;
-                    
+
                     checkboxDiv.appendChild(checkbox);
                     checkboxDiv.appendChild(label);
                     checkboxesDiv.appendChild(checkboxDiv);
                 });
-                
+
                 if (checkboxesDiv.children.length > 0) {
                     categoryDiv.appendChild(checkboxesDiv);
                     panel.appendChild(categoryDiv);
                 }
             });
-            
+
             // 更新排序下拉菜单
             updateSortColumnSelect();
         }
-        
+
         // 更新排序字段下拉菜单
         function updateSortColumnSelect() {
             const select = document.getElementById('sortColumn');
             const currentValue = select.value;
             select.innerHTML = '';
-            
-            // 添加常用字段
+
+            // 添加常用字段（使用基础列名，但会按排名排序）
             const commonFields = [
-                { value: 'best_rank', label: '最佳成绩排名' },
-                { value: 'average_rank', label: '平均成绩排名' },
-                { value: 'solved_mean_rank', label: '单次平均排名' },
-                { value: 'best', label: '最佳成绩' },
-                { value: 'average', label: '平均成绩' },
-                { value: 'solved_mean', label: '单次平均' },
-                { value: 'competitions', label: '比赛次数' },
-                { value: 'rounds', label: '轮次' }
+                { base: 'best', label: '最佳成绩' },
+                { base: 'average', label: '平均成绩' },
+                { base: 'solved_mean', label: '单次平均' },
+                { base: 'competitions', label: '比赛次数' },
+                { base: 'rounds', label: '轮次' }
             ];
-            
+
             commonFields.forEach(field => {
-                if (allHeaders.includes(field.value)) {
+                if (allHeaders.includes(field.base)) {
                     const option = document.createElement('option');
-                    option.value = field.value;
-                    option.textContent = field.label;
-                    if (field.value === currentValue) option.selected = true;
+                    option.value = field.base;
+                    option.textContent = field.label + ' (按排名)';
+                    if (field.base === currentValue) option.selected = true;
                     select.appendChild(option);
                 }
             });
-            
+
             // 添加分隔线
             if (visibleColumns.length > 0) {
                 const optgroup = document.createElement('optgroup');
                 optgroup.label = '其他字段';
                 select.appendChild(optgroup);
-                
-                visibleColumns.forEach(colKey => {
-                    if (!commonFields.find(f => f.value === colKey)) {
-                        const option = document.createElement('option');
-                        option.value = colKey;
-                        option.textContent = getColumnLabel(colKey);
-                        if (colKey === currentValue) option.selected = true;
-                        optgroup.appendChild(option);
+
+                visibleColumns.forEach(baseCol => {
+                    if (!commonFields.find(f => f.base === baseCol)) {
+                        const colDef = getColumnDef(baseCol);
+                        if (colDef) {
+                            const option = document.createElement('option');
+                            option.value = baseCol;
+                            let label = colDef.label;
+                            if (colDef.hasRank) label += ' (按排名)';
+                            option.textContent = label;
+                            if (baseCol === currentValue) option.selected = true;
+                            optgroup.appendChild(option);
+                        }
                     }
                 });
             }
         }
-        
+
         // 更新页面标题和描述
         function updateHeader() {
             const config = fileConfigs[currentFile];
@@ -933,7 +889,7 @@
                 document.getElementById('headerDescription').textContent = config.description;
             }
         }
-        
+
         // 加载 CSV 数据
         async function loadData(filename = null) {
             if (filename) {
@@ -948,30 +904,30 @@
                     document.getElementById('fileSelect').value = currentFile;
                 }
             }
-            
+
             // 更新页面标题
             updateHeader();
-            
+
             // 显示加载状态
             document.getElementById('loading').style.display = 'block';
             document.getElementById('error').style.display = 'none';
             document.getElementById('dataTable').style.display = 'none';
             document.getElementById('pagination').style.display = 'none';
-            
+
             try {
                 const response = await fetch(currentFile);
                 if (!response.ok) {
                     throw new Error(`文件 ${currentFile} 不存在或无法访问`);
                 }
-                
+
                 const text = await response.text();
                 const lines = text.trim().split('\n');
                 if (lines.length < 2) {
                     throw new Error('CSV 文件格式错误或为空');
                 }
-                
+
                 allHeaders = parseCSVLine(lines[0]);
-                
+
                 allData = lines.slice(1).map(line => {
                     const values = parseCSVLine(line);
                     const row = {};
@@ -982,15 +938,18 @@
                 });
 
                 filteredData = [...allData];
-                
+
                 // 重置到第一页
                 currentPage = 1;
-                
+
+                // 清除之前的错误信息
+                document.getElementById('error').style.display = 'none';
+
                 // 重新初始化列选择器（因为不同文件的列可能不同）
                 initColumnSelector();
                 updateStats();
                 renderTable();
-                
+
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('dataTable').style.display = 'table';
                 document.getElementById('pagination').style.display = 'flex';
@@ -1007,7 +966,7 @@
             const result = [];
             let current = '';
             let inQuotes = false;
-            
+
             for (let i = 0; i < line.length; i++) {
                 const char = line[i];
                 if (char === '"') {
@@ -1032,7 +991,7 @@
             const competitions = validData.reduce((sum, d) => sum + (parseInt(d.competitions) || 0), 0);
 
             document.getElementById('totalPlayers').textContent = filteredData.length;
-            document.getElementById('avgBest').textContent = bestValues.length > 0 
+            document.getElementById('avgBest').textContent = bestValues.length > 0
                 ? (bestValues.reduce((a, b) => a + b, 0) / bestValues.length).toFixed(2)
                 : '-';
             document.getElementById('avgAverage').textContent = avgValues.length > 0
@@ -1041,11 +1000,14 @@
             document.getElementById('totalCompetitions').textContent = competitions;
         }
 
-        // 排序数据
+        // 排序数据（默认使用排名列）
         function sortData() {
+            // 获取实际用于排序的列（优先使用排名列）
+            const actualSortCol = getSortColumn(sortColumn);
+            
             filteredData.sort((a, b) => {
-                let valA = a[sortColumn];
-                let valB = b[sortColumn];
+                let valA = a[actualSortCol];
+                let valB = b[actualSortCol];
 
                 // 处理数字
                 if (!isNaN(parseFloat(valA)) && !isNaN(parseFloat(valB))) {
@@ -1053,8 +1015,8 @@
                     valB = parseFloat(valB);
                 }
 
-                if (valA === '' || valA === null) return 1;
-                if (valB === '' || valB === null) return -1;
+                if (valA === '' || valA === null || valA === 'NaN') return 1;
+                if (valB === '' || valB === null || valB === 'NaN') return -1;
 
                 let comparison = 0;
                 if (valA < valB) comparison = -1;
@@ -1065,52 +1027,80 @@
         }
 
         // 获取列的显示名称
-        function getColumnLabel(key) {
+        function getColumnLabel(baseCol) {
             for (const category of Object.values(columnDefinitions)) {
-                const col = category.find(c => c.key === key);
+                const col = category.find(c => c.base === baseCol);
                 if (col) return col.label;
             }
-            return key;
+            return baseCol;
         }
         
+        // 获取列定义
+        function getColumnDef(baseCol) {
+            for (const category of Object.values(columnDefinitions)) {
+                const col = category.find(c => c.base === baseCol);
+                if (col) return col;
+            }
+            return null;
+        }
+        
+        // 获取排序列（默认使用排名列）
+        function getSortColumn(baseCol) {
+            const colDef = getColumnDef(baseCol);
+            if (colDef && colDef.hasRank && allHeaders.includes(baseCol + '_rank')) {
+                return baseCol + '_rank';
+            }
+            return baseCol;
+        }
+
         // 判断列是否为数字类型
         function isNumberColumn(key) {
             return key !== 'personName' && key !== 'personId' && key !== 'countryId' && key !== 'gender';
         }
-        
+
         // 判断列是否为排名类型
         function isRankColumn(key) {
             return key.endsWith('_rank') || key.endsWith('_nr');
         }
-        
+
         // 判断列是否为奖牌类型
         function isMedalColumn(key) {
             return key === 'gold' || key === 'silver' || key === 'bronze';
         }
-        
+
         // 渲染表格
         function renderTable() {
             sortData();
-            
+
             const thead = document.querySelector('#dataTable thead tr');
             const tbody = document.getElementById('tableBody');
-            
+
             // 渲染表头
             thead.innerHTML = '';
-            visibleColumns.forEach(colKey => {
+            visibleColumns.forEach(baseCol => {
+                const colDef = getColumnDef(baseCol);
                 const th = document.createElement('th');
                 th.className = 'sortable';
-                if (isNumberColumn(colKey)) {
+                
+                // 判断是否为数字列
+                if (baseCol !== 'personName' && baseCol !== 'personId' && baseCol !== 'countryId' && baseCol !== 'gender') {
                     th.className += ' number';
                 }
-                if (isRankColumn(colKey)) {
-                    th.className += ' rank';
+                
+                // 设置排序列（默认使用排名列）
+                const sortCol = getSortColumn(baseCol);
+                th.dataset.column = sortCol;
+                th.dataset.baseColumn = baseCol;
+                
+                // 显示列名
+                let label = getColumnLabel(baseCol);
+                if (colDef && colDef.hasRank && showRanks) {
+                    label += ' (含排名)';
                 }
-                th.dataset.column = colKey;
-                th.textContent = getColumnLabel(colKey);
+                th.textContent = label;
                 thead.appendChild(th);
             });
-            
+
             // 渲染表格内容
             tbody.innerHTML = '';
 
@@ -1118,12 +1108,13 @@
             const end = start + itemsPerPage;
             const pageData = filteredData.slice(start, end);
 
-            const formatNumber = (val) => {
+            const formatNumber = (val, isInteger = false) => {
                 if (!val || val === '' || val === 'NaN') return '-';
                 const num = parseFloat(val);
-                return isNaN(num) ? val : num.toFixed(2);
+                if (isNaN(num)) return val;
+                return isInteger ? Math.round(num).toString() : num.toFixed(2);
             };
-            
+
             const formatInteger = (val) => {
                 if (!val || val === '' || val === 'NaN') return '-';
                 const num = parseFloat(val);
@@ -1132,55 +1123,99 @@
 
             pageData.forEach((row) => {
                 const tr = document.createElement('tr');
-                
-                visibleColumns.forEach(colKey => {
+
+                visibleColumns.forEach(baseCol => {
+                    const colDef = getColumnDef(baseCol);
                     const td = document.createElement('td');
-                    let value = row[colKey] || '-';
                     
-                    if (isNumberColumn(colKey) && value !== '-') {
-                        td.className = 'number';
-                        if (isRankColumn(colKey)) {
-                            td.className += ' rank';
-                            value = formatInteger(value);
-                        } else if (isMedalColumn(colKey)) {
-                            if (colKey === 'gold') td.className += ' medal-gold';
-                            else if (colKey === 'silver') td.className += ' medal-silver';
-                            else if (colKey === 'bronze') td.className += ' medal-bronze';
-                            value = formatInteger(value);
-                        } else {
-                            value = formatNumber(value);
+                    // 获取基础值
+                    let baseValue = row[baseCol] || '-';
+                    
+                    // 判断是否为整数列
+                    const isIntegerCol = colDef && colDef.isInteger === true;
+                    
+                    // 如果有排名列且显示排名开关打开，合并显示
+                    if (colDef && colDef.hasRank && showRanks) {
+                        const rankCol = baseCol + '_rank';
+                        const nrCol = baseCol + '_nr';
+                        const rankValue = row[rankCol] || '-';
+                        const nrValue = row[nrCol] || '-';
+                        
+                        // 格式化显示：基础值 (全球排名/国家排名)
+                        let displayValue = baseValue;
+                        if (baseValue !== '-') {
+                            if (baseCol !== 'personName' && baseCol !== 'personId' && baseCol !== 'countryId' && baseCol !== 'gender') {
+                                displayValue = formatNumber(baseValue, isIntegerCol);
+                            }
                         }
+                        
+                        td.className = 'number';
+                        if (isMedalColumn(baseCol)) {
+                            if (baseCol === 'gold') td.className += ' medal-gold';
+                            else if (baseCol === 'silver') td.className += ' medal-silver';
+                            else if (baseCol === 'bronze') td.className += ' medal-bronze';
+                        }
+                        
+                        // 创建包含排名信息的显示
+                        const mainSpan = document.createElement('span');
+                        mainSpan.textContent = displayValue;
+                        td.appendChild(mainSpan);
+                        
+                        if (rankValue !== '-' || nrValue !== '-') {
+                            const rankInfo = document.createElement('span');
+                            rankInfo.className = 'rank-info';
+                            const rankStr = rankValue !== '-' ? formatInteger(rankValue) : '-';
+                            const nrStr = nrValue !== '-' ? formatInteger(nrValue) : '-';
+                            rankInfo.innerHTML = ` (<span class="rank-value">${rankStr}</span>/<span class="rank-value">${nrStr}</span>)`;
+                            td.appendChild(rankInfo);
+                        } else {
+                            td.textContent = displayValue;
+                        }
+                    } else {
+                        // 不显示排名，只显示基础值
+                        if (baseCol !== 'personName' && baseCol !== 'personId' && baseCol !== 'countryId' && baseCol !== 'gender') {
+                            td.className = 'number';
+                            if (isMedalColumn(baseCol)) {
+                                if (baseCol === 'gold') td.className += ' medal-gold';
+                                else if (baseCol === 'silver') td.className += ' medal-silver';
+                                else if (baseCol === 'bronze') td.className += ' medal-bronze';
+                                baseValue = formatInteger(baseValue);
+                            } else {
+                                baseValue = formatNumber(baseValue, isIntegerCol);
+                            }
+                        }
+                        td.textContent = baseValue;
                     }
-                    
-                    td.textContent = value;
+
                     tr.appendChild(td);
                 });
-                
+
                 tbody.appendChild(tr);
             });
 
             // 更新分页信息
             const totalPages = Math.ceil(filteredData.length / itemsPerPage);
-            document.getElementById('pageInfo').textContent = 
+            document.getElementById('pageInfo').textContent =
                 `第 ${currentPage} 页，共 ${totalPages} 页 (共 ${filteredData.length} 条记录)`;
-            
+
             document.getElementById('prevPage').disabled = currentPage === 1;
             document.getElementById('nextPage').disabled = currentPage >= totalPages;
 
             // 更新表头排序指示器和事件
             document.querySelectorAll('th.sortable').forEach(th => {
                 th.classList.remove('sort-asc', 'sort-desc');
-                if (th.dataset.column === sortColumn) {
+                const baseCol = th.dataset.baseColumn;
+                if (baseCol === sortColumn) {
                     th.classList.add(sortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
                 }
-                
+
                 // 重新绑定点击事件
                 th.onclick = () => {
-                    const column = th.dataset.column;
-                    if (sortColumn === column) {
+                    const baseCol = th.dataset.baseColumn;
+                    if (sortColumn === baseCol) {
                         sortOrder = sortOrder === 'asc' ? 'desc' : 'asc';
                     } else {
-                        sortColumn = column;
+                        sortColumn = baseCol; // 保存基础列名
                         sortOrder = 'asc';
                     }
                     renderTable();
@@ -1204,6 +1239,19 @@
         document.getElementById('fileSelect').addEventListener('change', (e) => {
             loadData(e.target.value);
         });
+
+        document.getElementById('showRanks').addEventListener('change', (e) => {
+            showRanks = e.target.checked;
+            localStorage.setItem('showRanks', showRanks);
+            renderTable();
+        });
+
+        // 加载显示排名设置
+        const savedShowRanks = localStorage.getItem('showRanks');
+        if (savedShowRanks !== null) {
+            showRanks = savedShowRanks === 'true';
+            document.getElementById('showRanks').checked = showRanks;
+        }
 
         document.getElementById('sortColumn').addEventListener('change', (e) => {
             sortColumn = e.target.value;
@@ -1238,7 +1286,7 @@
             const panel = document.getElementById('columnSelectorPanel');
             panel.classList.toggle('show');
         });
-        
+
         // 点击外部关闭面板
         document.addEventListener('click', (e) => {
             const panel = document.getElementById('columnSelectorPanel');
@@ -1247,48 +1295,48 @@
                 panel.classList.remove('show');
             }
         });
-        
+
         document.getElementById('selectAllBtn').addEventListener('click', () => {
             document.querySelectorAll('#columnCheckboxes input[type="checkbox"]').forEach(cb => {
                 cb.checked = true;
             });
         });
-        
+
         document.getElementById('selectNoneBtn').addEventListener('click', () => {
             document.querySelectorAll('#columnCheckboxes input[type="checkbox"]').forEach(cb => {
                 cb.checked = false;
             });
         });
-        
+
         document.getElementById('selectDefaultBtn').addEventListener('click', () => {
             document.querySelectorAll('#columnCheckboxes input[type="checkbox"]').forEach(cb => {
                 cb.checked = defaultColumns.includes(cb.value);
             });
         });
-        
+
         document.getElementById('applyColumnsBtn').addEventListener('click', () => {
             visibleColumns = [];
             document.querySelectorAll('#columnCheckboxes input[type="checkbox"]:checked').forEach(cb => {
                 visibleColumns.push(cb.value);
             });
-            
+
             // 确保至少有一个列被选中
             if (visibleColumns.length === 0) {
                 const defaultCol = allHeaders.includes('personName') ? 'personName' : allHeaders[0];
                 visibleColumns = [defaultCol];
                 alert('至少需要选择一个列！已自动选择默认列。');
             }
-            
+
             // 保存到 localStorage（按文件分别保存）
             const savedColumnsKey = `visibleColumns_${currentFile}`;
             localStorage.setItem(savedColumnsKey, JSON.stringify(visibleColumns));
-            
+
             // 关闭面板
             document.getElementById('columnSelectorPanel').classList.remove('show');
-            
+
             // 更新排序下拉菜单
             updateSortColumnSelect();
-            
+
             // 重新渲染表格
             currentPage = 1;
             renderTable();
@@ -1299,4 +1347,3 @@
     </script>
 </body>
 </html>
-
