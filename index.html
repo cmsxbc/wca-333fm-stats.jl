@@ -651,10 +651,14 @@
         };
 
         // 默认显示的列（只显示基础列，排名通过开关控制）
+        // personId 是必选列，始终在第一列
         const defaultColumns = [
-            'personName', 'best', 'average', 'solved_mean', 
+            'personId', 'personName', 'best', 'average', 'solved_mean', 
             'competitions', 'rounds', 'solved_count', 'gold', 'silver', 'bronze'
         ];
+        
+        // 必选列（不能被取消选择）
+        const requiredColumns = ['personId'];
         
         // 检查列是否完整（有排名列的数据列必须有三列）
         function validateColumnGroup(baseCol) {
@@ -700,9 +704,20 @@
                 visibleColumns = defaultColumns.filter(col => allHeaders.includes(col));
             }
 
+            // 确保必选列（personId）始终被包含，并且放在第一位
+            requiredColumns.forEach(reqCol => {
+                if (allHeaders.includes(reqCol)) {
+                    // 移除已存在的必选列（如果不在第一位）
+                    visibleColumns = visibleColumns.filter(col => col !== reqCol);
+                    // 插入到第一位
+                    visibleColumns.unshift(reqCol);
+                }
+            });
+
             // 确保至少有一个列被选中
             if (visibleColumns.length === 0 && allHeaders.length > 0) {
-                visibleColumns = allHeaders.includes('personName') ? ['personName'] : [allHeaders[0]];
+                visibleColumns = allHeaders.includes('personId') ? ['personId'] : 
+                                (allHeaders.includes('personName') ? ['personName'] : [allHeaders[0]]);
             }
 
             // 检查数据完整性
@@ -769,7 +784,12 @@
                 selectNoneBtn.type = 'button';
                 selectNoneBtn.onclick = () => {
                     const categoryCheckboxes = categoryDiv.querySelectorAll('input[type="checkbox"]');
-                    categoryCheckboxes.forEach(cb => cb.checked = false);
+                    categoryCheckboxes.forEach(cb => {
+                        // 必选列不能被取消选择
+                        if (!requiredColumns.includes(cb.value)) {
+                            cb.checked = false;
+                        }
+                    });
                 };
 
                 categoryActions.appendChild(selectAllBtn);
@@ -797,6 +817,14 @@
                     checkbox.id = `col_${col.base}`;
                     checkbox.value = col.base;
                     checkbox.checked = visibleColumns.includes(col.base);
+                    
+                    // 必选列不能被取消选择
+                    if (requiredColumns.includes(col.base)) {
+                        checkbox.disabled = true;
+                        checkbox.checked = true;
+                        checkboxDiv.style.opacity = '0.6';
+                        checkboxDiv.title = '此列为必选列，不能取消选择';
+                    }
 
                     const label = document.createElement('label');
                     label.htmlFor = `col_${col.base}`;
@@ -1003,6 +1031,16 @@
         // 渲染表格
         function renderTable() {
             sortData();
+
+            // 确保必选列（personId）始终在第一列
+            requiredColumns.forEach(reqCol => {
+                if (allHeaders.includes(reqCol) && visibleColumns.includes(reqCol)) {
+                    // 移除已存在的必选列（如果不在第一位）
+                    visibleColumns = visibleColumns.filter(col => col !== reqCol);
+                    // 插入到第一位
+                    visibleColumns.unshift(reqCol);
+                }
+            });
 
             const thead = document.querySelector('#dataTable thead tr');
             const tbody = document.getElementById('tableBody');
@@ -1226,7 +1264,10 @@
 
         document.getElementById('selectNoneBtn').addEventListener('click', () => {
             document.querySelectorAll('#columnCheckboxes input[type="checkbox"]').forEach(cb => {
-                cb.checked = false;
+                // 必选列不能被取消选择
+                if (!requiredColumns.includes(cb.value)) {
+                    cb.checked = false;
+                }
             });
         });
 
@@ -1242,9 +1283,20 @@
                 visibleColumns.push(cb.value);
             });
 
+            // 确保必选列（personId）始终被包含，并且放在第一位
+            requiredColumns.forEach(reqCol => {
+                if (allHeaders.includes(reqCol)) {
+                    // 移除已存在的必选列（如果不在第一位）
+                    visibleColumns = visibleColumns.filter(col => col !== reqCol);
+                    // 插入到第一位
+                    visibleColumns.unshift(reqCol);
+                }
+            });
+
             // 确保至少有一个列被选中
             if (visibleColumns.length === 0) {
-                const defaultCol = allHeaders.includes('personName') ? 'personName' : allHeaders[0];
+                const defaultCol = allHeaders.includes('personId') ? 'personId' : 
+                                  (allHeaders.includes('personName') ? 'personName' : allHeaders[0]);
                 visibleColumns = [defaultCol];
                 alert('至少需要选择一个列！已自动选择默认列。');
             }
