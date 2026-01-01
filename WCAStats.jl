@@ -19,7 +19,7 @@ function load_wca(zip_path)
     if !occursin("WCA_export_v2_", zip_path)
         return missing
     end
-    for name in ["persons", "results", "result_attempts"]
+    for name in ["persons", "results", "result_attempts", "competitions"]
         filename = "WCA_export_" * name * ".tsv"
         d[name] = CSV.read(read(z.files[findfirst(x -> x.name == filename, z.files)]), DataFrames.DataFrame)
     end
@@ -27,9 +27,14 @@ function load_wca(zip_path)
 end
 
 
-function get_event_result(wca_dict, event_id)
+function get_event_result(wca_dict, event_id, year)
+    df = filter(:event_id => ==(event_id), wca_dict["results"])
+    if year !== missing
+        comp_df = filter(:year => ==(year), wca_dict["competitions"])
+        df = filter(:competition_id => ∈(comp_df[!, "id"]), df)
+    end
     return DataFrames.rename(
-        filter(:event_id => ==(event_id), wca_dict["results"]),
+        df,
         :competition_id => :competitionId,
         :person_id => :personId,
         :round_type_id => :roundTypeId
@@ -37,11 +42,10 @@ function get_event_result(wca_dict, event_id)
 end
 
 
-function get_single_res_df(wca_dict, event_id)
-    res_df = get_event_result(wca_dict, event_id)
+function get_single_res_df(wca_dict, event_df)
     return sort(
         DataFrames.leftjoin(
-            res_df, wca_dict["result_attempts"],
+            event_df, wca_dict["result_attempts"],
             on=:id => :result_id,
             makeunique=true,
         ),
@@ -282,8 +286,19 @@ function process_data(parsed_args)
         return
     end
     println("Load Data done")
-    fm_single_res_df = get_single_res_df(wca_data, "333fm")
-    event_df = get_event_result(wca_data, "333fm")
+    if haskey(parsed_args, "year")
+        year = parsed_args["year"]
+        all_filename = "results.$(year).csv"
+        top100_filename = "results.top100.$(year).csv"
+        china_top30_filename = "results.china.top30.$(year).csv"
+    else
+        year = missing
+        all_filename = "results.csv"
+        top100_filename = "results.top100.csv"
+        china_top30_filename = "results.china.top30.csv"
+    end
+    event_df = get_event_result(wca_data, "333fm", year)
+    fm_single_res_df = get_single_res_df(wca_data, event_df)
     df = DataFrames.leftjoin(
         stats_round_result(event_df, :personId),
         stats_single_result(fm_single_res_df, :personId, :value),
@@ -325,11 +340,11 @@ function process_data(parsed_args)
         map(x -> (x => StatsBase.competerank => Symbol("$x" * "_nr")), asc_cols),
         map(x -> (x => (y -> StatsBase.competerank(y, rev=true)) => Symbol("$x" * "_nr")), desc_cols),
     )
-    CSV.write("results.csv", df)
+    CSV.write(all_filename, df)
     top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...) -> any(vv -> isless(vv, 100), v), df)
-    CSV.write("results.top100.csv", top100_df)
+    CSV.write(top100_filename, top100_df)
     china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...) -> any(vv -> isless(vv, 30), v), filter(:countryId => ==("China"), df))
-    CSV.write("results.china.top30.csv", china_top30_df)
+    CSV.write(china_top30_filename, china_top30_df)
 
     if parsed_args["%COMMAND%"] === "topk"
         print_topk(df, Symbol(parsed_args["topk"]["col"]), parsed_args["topk"]["k"], parsed_args["topk"]["country"])
@@ -350,6 +365,9 @@ function __init__()
         "topk", "K"
         help = "print topk"
         action = :command
+        "--year"
+        help = "only stats special year"
+        arg_type = Int
     end
 
     ArgParse.@add_arg_table! s["person"] begin
