@@ -27,10 +27,10 @@ function load_wca(zip_path)
 end
 
 
-function get_event_result(wca_dict, event_id, year)
+function get_event_result(wca_dict, event_id, year_filter)
     df = filter(:event_id => ==(event_id), wca_dict["results"])
-    if isa(year, Int)
-        comp_df = filter(:year => ==(year), wca_dict["competitions"])
+    if year_filter !== missing
+        comp_df = filter(:year => year_filter, wca_dict["competitions"])
         df = filter(:competition_id => ∈(comp_df[!, "id"]), df)
     end
     return DataFrames.rename(
@@ -44,8 +44,22 @@ end
 
 function get_event_years(wca_dict, event_id)
     event_competition_ids = DataFrames.unique(filter(:event_id => ==(event_id), wca_dict["results"])[!, :competition_id])
-    years = DataFrames.unique(filter(:id => ∈(event_competition_ids), wca_dict["competitions"])[!, :year])
-    return years
+    year_df = DataFrames.combine(
+        filter(:id => ∈(event_competition_ids), wca_dict["competitions"]),
+        :year => (x -> x |> extrema |> vcat) => [:year_min, :year_max]
+    )
+    return year_df[1, :year_min]:year_df[1, :year_max]
+end
+
+
+function get_person_event_years(wca_dict, person_id, event_id)
+    event_df = filter(:event_id => ==(event_id), wca_dict["results"])
+    event_competition_ids = DataFrames.unique(event_df[!, :competition_id])
+    person_event_df = filter(:person_id => ==(person_id), event_df)
+    person_competition_ids = DataFrames.unique(person_event_df[!, :competition_id])
+    year_min = minimum(filter(:id => ∈(person_competition_ids), wca_dict["competitions"])[!, :year])
+    year_max = maximum(filter(:id => ∈(event_competition_ids), wca_dict["competitions"])[!, :year])
+    return year_min:year_max
 end
 
 
@@ -307,8 +321,8 @@ function print_topk(df, col, k, country)
 end
 
 
-function calc(wca_data, year)
-    event_df = get_event_result(wca_data, "333fm", year)
+function calc(wca_data, year_filter)
+    event_df = get_event_result(wca_data, "333fm", year_filter)
     fm_single_res_df = get_single_res_df(wca_data, event_df)
     df = DataFrames.leftjoin(
         stats_round_result(event_df, :personId),
@@ -365,31 +379,79 @@ function process_data(parsed_args)
     if !isdir(result_dir)
         mkdir(result_dir)
     end
-    years = vcat([missing], sort(get_event_years(wca_data, "333fm")))
-    if isa(parsed_args["year"], Int)
-        years = filter(x -> x === missing || x == parsed_args["year"], years)
+    is_summary = parsed_args["%COMMAND%"] === "summary"
+    if is_summary
+        person_id = parsed_args["summary"]["id"]
+        years = sort(get_person_event_years(wca_data, person_id, "333fm"))
+        person_filter = :personId => ==(person_id)
+        dfs = []
+        last_dfs = Dict()
+    else
+        years = sort(get_event_years(wca_data, "333fm"))
+        if isa(parsed_args["year"], Int)
+            years = filter(==(parsed_args["year"]), years)
+        end
     end
-    for year in years
-        year_name = year === missing ? "all" : string(year)
-        println("dealing ", year_name, " ...")
-        all_filename = joinpath(result_dir, "results.$(year_name).csv")
-        df = calc(wca_data, year)
-        CSV.write(all_filename, df)
-        println("saved: ", all_filename)
-        if year === missing
-            if parsed_args["%COMMAND%"] === "topk"
-                print_topk(df, Symbol(parsed_args["topk"]["col"]), parsed_args["topk"]["k"], parsed_args["topk"]["country"])
-            elseif parsed_args["%COMMAND%"] == "person"
-                print_some_persons(df, parsed_args["person"]["ids"])
-            else # these filter is too slow...
-                top100_filename = joinpath(result_dir, "results.top100.$(year_name).csv")
-                top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...) -> any(vv -> isless(vv, 100), v), df)
-                CSV.write(top100_filename, top100_df)
-                china_top30_filename = joinpath(result_dir, "results.china.top30.$(year_name).csv")
-                china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...) -> any(vv -> isless(vv, 30), v), filter(:countryId => ==("China"), df))
-                CSV.write(china_top30_filename, china_top30_df)
+    for yi in eachindex(years)
+        year = years[yi]
+        println("dealing ", year, " ...")
+        for cat_config in zip(["in", "to"], [==(year), <=(year)])
+            category = cat_config[1]
+            cat_filter = cat_config[2]
+            filename = joinpath(result_dir, "results.$(category)$(year).csv")
+            df = calc(wca_data, cat_filter)
+            CSV.write(filename, df)
+            println("saved: ", filename)
+            if is_summary
+                person_df = filter(person_filter, df)
+                if DataFrames.nrow(person_df) == 0
+                    person_df = DataFrames.leftjoin(
+                        DataFrames.DataFrame(personId=[person_id]),
+                        person_df,
+                        on=:personId
+                    )
+                end
+                person_df[!, :year] .= year
+                person_df[!, :category] .= "$(category)-year"
+                push!(dfs, person_df)
+                if haskey(last_dfs, category)
+                    last_df = last_dfs[category]
+                    column_selector = DataFrames.Not(:personId, :personName, :countryId, :gender, :year, :category)
+                    delta_df = DataFrames.DataFrame([
+                        col => person_df[:, col] - last_df[:, col]
+                        for col in map(Symbol, names(person_df[:, column_selector]))
+                    ])
+                    for col in [:personId, :personName, :countryId, :gender]
+                        delta_df[!, col] = person_df[:, col]
+                    end
+                    delta_df[!, :year] .= year
+                    delta_df[!, :category] .= "$(category)-year-detla"
+                    push!(dfs, delta_df)
+                end
+                last_dfs[category] = person_df
+            end
+            if !checkbounds(Bool, years, nextind(years, yi)) && category == "to"  # least year.
+                if parsed_args["%COMMAND%"] === "topk"
+                    print_topk(df, Symbol(parsed_args["topk"]["col"]), parsed_args["topk"]["k"], parsed_args["topk"]["country"])
+                elseif parsed_args["%COMMAND%"] == "person"
+                    print_some_persons(df, parsed_args["person"]["ids"])
+                else # these filter is too slow...
+                    # top100_filename = joinpath(result_dir, "results.top100.$(year).csv")
+                    # top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...) -> any(vv -> isless(vv, 100), v), df)
+                    # CSV.write(top100_filename, top100_df)
+                    # china_top30_filename = joinpath(result_dir, "results.china.top30.$(year).csv")
+                    # china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...) -> any(vv -> isless(vv, 30), v), filter(:countryId => ==("China"), df))
+                    # CSV.write(china_top30_filename, china_top30_df)
+                end
             end
         end
+    end
+    if is_summary
+        df = reduce(vcat, dfs)
+        for col in [:personName, :countryId, :gender]
+            df[:, col] .= dfs[1][1, col]
+        end
+        CSV.write(joinpath(result_dir, "$(person_id).csv"), df)
     end
 end
 
@@ -404,6 +466,9 @@ function __init__()
         action = :command
         "topk", "K"
         help = "print topk"
+        action = :command
+        "summary", "S"
+        help = "summary one person"
         action = :command
         "--year"
         help = "only stats special year"
@@ -423,6 +488,11 @@ function __init__()
         arg_type = Int
         "--country"
         default = missing
+    end
+
+    ArgParse.@add_arg_table! s["summary"] begin
+        "id"
+        required = true
     end
 
     ArgParse.@add_arg_table! s begin
