@@ -42,6 +42,13 @@ function get_event_result(wca_dict, event_id, year)
 end
 
 
+function get_event_years(wca_dict, event_id)
+    event_competition_ids = DataFrames.unique(filter(:event_id => ==(event_id), wca_dict["results"])[!, :competition_id])
+    years = DataFrames.unique(filter(:id => ∈(event_competition_ids), wca_dict["competitions"])[!, :year])
+    return years
+end
+
+
 function get_single_res_df(wca_dict, event_df)
     return sort(
         DataFrames.leftjoin(
@@ -183,32 +190,43 @@ function stats_round_result(df, id_col)
         ),
         on=id_col
     )
-
-    rdf = DataFrames.leftjoin(
-        rdf,
-        DataFrames.combine(
-            DataFrames.groupby(
-                DataFrames.transform(
-                    filter(:average => >(0), df),
-                    # DataFrames.AsTable([:value1, :value2, :value3]) => DataFrames.ByRow(x -> [maximum(x), DataFrames.median(x)]) => [:wrost_in_average, :median_in_average],
-                    :average => (x -> x / 100) => :average_real,
+    avg_df = filter(:average => >(0), df)
+    if DataFrames.nrow(avg_df) > 0
+        rdf = DataFrames.leftjoin(
+            rdf,
+            DataFrames.combine(
+                DataFrames.groupby(
+                    DataFrames.transform(
+                        avg_df,
+                        # DataFrames.AsTable([:value1, :value2, :value3]) => DataFrames.ByRow(x -> [maximum(x), DataFrames.median(x)]) => [:wrost_in_average, :median_in_average],
+                        :average => (x -> x / 100) => :average_real,
+                    ),
+                    id_col,
                 ),
-                id_col,
+                :average_real => (x -> x |> extrema |> vcat) => [:average, :average_max],
+                DataFrames.nrow => :average_count,
+                :average => nunique => :average_nunique,
+                :average_real => DataFrames.mean => :average_mean,
+                :average_real => DataFrames.std => :average_std,
+                :average_real => avg => :average_avg,
+                :average_real => DataFrames.median => :average_median,
+                :average => (x -> [(x[1][1] / 100, x[1][2])]) ∘ mode_count => [:average_mode, :average_mode_count],
+                :average => (x -> [(x[1][1], x[1][2] / 100, x[1][3] / 100)]) ∘ Base.Fix2(calc_consecutive, [33, 34]) => [:average_consecutive, :average_consecutive_start, :average_consecutive_end],
+                # :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
+                # :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
             ),
-            :average_real => (x -> x |> extrema |> vcat) => [:average, :average_max],
-            DataFrames.nrow => :average_count,
-            :average => nunique => :average_nunique,
-            :average_real => DataFrames.mean => :average_mean,
-            :average_real => DataFrames.std => :average_std,
-            :average_real => avg => :average_avg,
-            :average_real => DataFrames.median => :average_median,
-            :average => (x -> [(x[1][1] / 100, x[1][2])]) ∘ mode_count => [:average_mode, :average_mode_count],
-            :average => (x -> [(x[1][1], x[1][2] / 100, x[1][3] / 100)]) ∘ Base.Fix2(calc_consecutive, [33, 34]) => [:average_consecutive, :average_consecutive_start, :average_consecutive_end],
-            # :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
-            # :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
-        ),
-        on=id_col
-    )
+            on=id_col
+        )
+    else
+        for col_name in [
+            :average, :average_max, :average_count, :average_nunique,
+            :average_mean, :average_std, :average_avg, :average_median,
+            :average_mode, :average_mode_count,
+            :average_consecutive, :average_consecutive_start, :average_consecutive_end,
+        ]
+            rdf[!, col_name] .= missing
+        end
+    end
 
     rdf = DataFrames.leftjoin(
         rdf,
@@ -231,18 +249,28 @@ function stats_round_result(df, id_col)
     return rdf
 end
 
-function stats_round_non_best_result(event_df, single_df, id_col, val_col)
-    df = DataFrames.combine(
-        DataFrames.groupby(filter(:average => >(0), single_df), :id),
-        val_col => maximum => :wrost_in_average,
-        val_col => (x -> Int(DataFrames.median(x))) => :median_in_average,
-        id_col => last => id_col
-    )
-    return DataFrames.combine(
-        DataFrames.groupby(df, id_col),
-        :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
-        :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
-    )
+function stats_round_non_best_result(single_df, id_col, val_col)
+    has_avg_df = filter(:average => >(0), single_df)
+    if DataFrames.nrow(has_avg_df) > 0
+        df = DataFrames.combine(
+            DataFrames.groupby(has_avg_df, :id),
+            val_col => maximum => :wrost_in_average,
+            val_col => (x -> Int(DataFrames.median(x))) => :median_in_average,
+            id_col => last => id_col
+        )
+        return DataFrames.combine(
+            DataFrames.groupby(df, id_col),
+            :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
+            :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
+        )
+    else
+        df = DataFrames.DataFrame(
+            avg_item_3rd_min=Float64[], avg_item_3rd_max=Float64[],
+            avg_item_2nd_min=Float64[], avg_item_2nd_max=Float64[],
+        )
+        df[!, id_col] .= missing
+        return df
+    end
 end
 
 function print_some_persons(df, person_ids)
@@ -279,23 +307,7 @@ function print_topk(df, col, k, country)
 end
 
 
-function process_data(parsed_args)
-    wca_data = load_wca(parsed_args["source"])
-    if wca_data === missing
-        println("cannot load data")
-        return
-    end
-    println("Load Data done")
-    if isa(parsed_args["year"], Int)
-        all_filename = "results.$(year).csv"
-        top100_filename = "results.top100.$(year).csv"
-        china_top30_filename = "results.china.top30.$(year).csv"
-    else
-        year = missing
-        all_filename = "results.csv"
-        top100_filename = "results.top100.csv"
-        china_top30_filename = "results.china.top30.csv"
-    end
+function calc(wca_data, year)
     event_df = get_event_result(wca_data, "333fm", year)
     fm_single_res_df = get_single_res_df(wca_data, event_df)
     df = DataFrames.leftjoin(
@@ -305,7 +317,7 @@ function process_data(parsed_args)
     )
     df = DataFrames.leftjoin(
         df,
-        stats_round_non_best_result(event_df, fm_single_res_df, :personId, :value),
+        stats_round_non_best_result(fm_single_res_df, :personId, :value),
         on=:personId
     )
     all_cols = filter(!=("personId"), names(df))
@@ -339,16 +351,45 @@ function process_data(parsed_args)
         map(x -> (x => StatsBase.competerank => Symbol("$x" * "_nr")), asc_cols),
         map(x -> (x => (y -> StatsBase.competerank(y, rev=true)) => Symbol("$x" * "_nr")), desc_cols),
     )
-    CSV.write(all_filename, df)
-    top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...) -> any(vv -> isless(vv, 100), v), df)
-    CSV.write(top100_filename, top100_df)
-    china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...) -> any(vv -> isless(vv, 30), v), filter(:countryId => ==("China"), df))
-    CSV.write(china_top30_filename, china_top30_df)
+    return df
+end
 
-    if parsed_args["%COMMAND%"] === "topk"
-        print_topk(df, Symbol(parsed_args["topk"]["col"]), parsed_args["topk"]["k"], parsed_args["topk"]["country"])
-    elseif parsed_args["%COMMAND%"] == "person"
-        print_some_persons(df, parsed_args["person"]["ids"])
+function process_data(parsed_args)
+    wca_data = load_wca(parsed_args["source"])
+    if wca_data === missing
+        println("cannot load data")
+        return
+    end
+    println("Load Data done")
+    result_dir = "results/"
+    if !isdir(result_dir)
+        mkdir(result_dir)
+    end
+    years = vcat([missing], sort(get_event_years(wca_data, "333fm")))
+    if isa(parsed_args["year"], Int)
+        years = filter(x -> x === missing || x == parsed_args["year"], years)
+    end
+    for year in years
+        year_name = year === missing ? "all" : string(year)
+        println("dealing ", year_name, " ...")
+        all_filename = joinpath(result_dir, "results.$(year_name).csv")
+        df = calc(wca_data, year)
+        CSV.write(all_filename, df)
+        println("saved: ", all_filename)
+        if year === missing
+            if parsed_args["%COMMAND%"] === "topk"
+                print_topk(df, Symbol(parsed_args["topk"]["col"]), parsed_args["topk"]["k"], parsed_args["topk"]["country"])
+            elseif parsed_args["%COMMAND%"] == "person"
+                print_some_persons(df, parsed_args["person"]["ids"])
+            else # these filter is too slow...
+                top100_filename = joinpath(result_dir, "results.top100.$(year_name).csv")
+                top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...) -> any(vv -> isless(vv, 100), v), df)
+                CSV.write(top100_filename, top100_df)
+                china_top30_filename = joinpath(result_dir, "results.china.top30.$(year_name).csv")
+                china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...) -> any(vv -> isless(vv, 30), v), filter(:countryId => ==("China"), df))
+                CSV.write(china_top30_filename, china_top30_df)
+            end
+        end
     end
 end
 
