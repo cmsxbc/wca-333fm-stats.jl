@@ -29,7 +29,7 @@ end
 
 function get_event_result(wca_dict, event_id, year)
     df = filter(:event_id => ==(event_id), wca_dict["results"])
-    if year !== missing
+    if isa(year, Int)
         comp_df = filter(:year => ==(year), wca_dict["competitions"])
         df = filter(:competition_id => ∈(comp_df[!, "id"]), df)
     end
@@ -286,8 +286,7 @@ function process_data(parsed_args)
         return
     end
     println("Load Data done")
-    if haskey(parsed_args, "year")
-        year = parsed_args["year"]
+    if isa(parsed_args["year"], Int)
         all_filename = "results.$(year).csv"
         top100_filename = "results.top100.$(year).csv"
         china_top30_filename = "results.china.top30.$(year).csv"
