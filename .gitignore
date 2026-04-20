@@ -30,7 +30,11 @@ results/
 results-julia/
 results-rust/
 results-julia-new/
+results-cpp/
 
 # rust build artifacts
 rust-wca-stats/target/
+
+# cpp build artifacts
+cpp-wca-stats/build/
 
