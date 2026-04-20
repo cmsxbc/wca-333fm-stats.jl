@@ -42,6 +42,33 @@ function get_event_result(wca_dict, event_id, year_filter)
 end
 
 
+# Precompute an event-scoped results frame joined with competition years.
+# This lets per-year filters be a simple comparison against an integer column
+# instead of a two-step (competitions->ids->results) filter.
+function prepare_event_results(wca_dict, event_id)
+    df = filter(:event_id => ==(event_id), wca_dict["results"])
+    comp_years = DataFrames.select(wca_dict["competitions"], :id, :year)
+    df = DataFrames.leftjoin(df, comp_years, on=:competition_id => :id)
+    return DataFrames.rename(
+        df,
+        :competition_id => :competitionId,
+        :person_id => :personId,
+        :round_type_id => :roundTypeId,
+    )
+end
+
+
+# Precompute persons[sub_id==1] projected/renamed to calc's join shape.
+function prepare_persons(wca_dict)
+    return DataFrames.rename(
+        filter(:sub_id => ==(1), wca_dict["persons"])[!, [:wca_id, :name, :country_id, :gender]],
+        :wca_id => :personId,
+        :name => :personName,
+        :country_id => :countryId,
+    )
+end
+
+
 function get_event_years(wca_dict, event_id)
     event_competition_ids = DataFrames.unique(filter(:event_id => ==(event_id), wca_dict["results"])[!, :competition_id])
     year_df = DataFrames.combine(
@@ -322,7 +349,15 @@ end
 
 
 function calc(wca_data, year_filter)
-    event_df = get_event_result(wca_data, "333fm", year_filter)
+    # Fallback path that prepares inputs on every call. Prefer the 4-arg
+    # method below from a per-run driver to avoid repeating this work.
+    event_all = prepare_event_results(wca_data, "333fm")
+    persons_sel = prepare_persons(wca_data)
+    return calc(wca_data, event_all, persons_sel, year_filter)
+end
+
+function calc(wca_data, event_all, persons_sel, year_filter)
+    event_df = year_filter === missing ? event_all : filter(:year => year_filter, event_all)
     fm_single_res_df = get_single_res_df(wca_data, event_df)
     df = DataFrames.leftjoin(
         stats_round_result(event_df, :personId),
@@ -336,14 +371,7 @@ function calc(wca_data, year_filter)
     )
     all_cols = filter(!=("personId"), names(df))
     df = DataFrames.rightjoin(
-        DataFrames.rename(
-            filter(
-                :sub_id => ==(1),
-                wca_data["persons"]
-            )[!, [:wca_id, :name, :country_id, :gender]],
-            :wca_id => :personId, :name => :personName,
-            :country_id => :countryId
-        ),
+        persons_sel,
         df,
         on=:personId
     )
@@ -375,6 +403,8 @@ function process_data(parsed_args)
         return
     end
     println("Load Data done")
+    event_all = prepare_event_results(wca_data, "333fm")
+    persons_sel = prepare_persons(wca_data)
     result_dir = "results/"
     if !isdir(result_dir)
         mkdir(result_dir)
@@ -399,7 +429,7 @@ function process_data(parsed_args)
             category = cat_config[1]
             cat_filter = cat_config[2]
             filename = joinpath(result_dir, "results.$(category)$(year).csv")
-            df = calc(wca_data, cat_filter)
+            df = calc(wca_data, event_all, persons_sel, cat_filter)
             CSV.write(filename, df)
             println("saved: ", filename)
             if is_summary
