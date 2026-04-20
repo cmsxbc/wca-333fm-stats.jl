@@ -1,0 +1,19 @@
+[package]
+name = "wca-stats"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+csv = "1"
+clap = { version = "4", features = ["derive"] }
+ahash = "0.8"
+ryu = "1"
+itoa = "1"
+memchr = "2"
+anyhow = "1.0.102"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

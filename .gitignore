@@ -27,3 +27,10 @@ docs/site/
 # ignore wca exported result
 *.tsv.zip
 results/
+results-julia/
+results-rust/
+results-julia-new/
+
+# rust build artifacts
+rust-wca-stats/target/
+
