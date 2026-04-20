@@ -86,6 +86,10 @@ Full-export run on the same machine (input ≈ 353 MB zipped, 48 output CSVs):
 | `default` (all years) | 128.4 s | 11.0 s | **~11.7×** |
 | `summary <id>` | ~148 s | ~20 s | ~7.4× |
 
+The Rust port now runs the full export in ~10.9 s; the C++23 port is faster
+still at ~7.9 s thanks to `libdeflate` and more cache-friendly allocation
+patterns (see [`cpp-wca-stats/README.md`](../cpp-wca-stats/README.md)).
+
 The loader reads each zipped TSV into a single buffer (zlib-ng decompression)
 and parses it with a hand-rolled `memchr`-based splitter and a custom
 `FromDecimal` integer parser (no UTF-8 validation on the numeric hot path).

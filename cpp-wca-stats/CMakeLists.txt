@@ -15,6 +15,7 @@ add_compile_options($<$<CONFIG:Release>:-flto>)
 add_link_options($<$<CONFIG:Release>:-flto>)
 
 find_library(ZIP_LIB NAMES zip REQUIRED)
+find_library(DEFLATE_LIB NAMES deflate REQUIRED)
 
 add_executable(wca-stats
     src/main.cpp
@@ -22,4 +23,4 @@ add_executable(wca-stats
     src/calc.cpp
     src/output.cpp
 )
-target_link_libraries(wca-stats PRIVATE ${ZIP_LIB})
+target_link_libraries(wca-stats PRIVATE ${ZIP_LIB} ${DEFLATE_LIB})

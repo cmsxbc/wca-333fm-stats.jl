@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include <libdeflate.h>
 #include <zip.h>
 
 namespace wca {
@@ -35,41 +36,82 @@ struct TsvLine {
     std::vector<string_view> fields;
     void split(string_view line) {
         fields.clear();
-        std::size_t start = 0;
-        for (std::size_t i = 0; i < line.size(); ++i) {
-            if (line[i] == '\t') {
-                fields.emplace_back(line.data() + start, i - start);
-                start = i + 1;
+        const char* data = line.data();
+        const char* end = data + line.size();
+        const char* start = data;
+        for (const char* p = data; p < end; ++p) {
+            if (*p == '\t') {
+                fields.emplace_back(start, static_cast<std::size_t>(p - start));
+                start = p + 1;
             }
         }
-        fields.emplace_back(line.data() + start, line.size() - start);
+        fields.emplace_back(start, static_cast<std::size_t>(end - start));
     }
     string_view at(std::size_t i) const {
         return i < fields.size() ? fields[i] : string_view{};
     }
 };
 
-// Read the full contents of a named zip entry into a string.
+// Read the full contents of a named zip entry into a std::string, decompressing
+// with libdeflate (significantly faster than libzip's bundled zlib path).
 std::string read_entry(zip_t* z, const char* name) {
     zip_stat_t st;
     zip_stat_init(&st);
     if (zip_stat(z, name, 0, &st) != 0) {
         throw std::runtime_error(std::format("missing zip entry: {}", name));
     }
-    auto size = st.size;
-    std::string buf;
-    buf.resize(size);
-    zip_file_t* f = zip_fopen(z, name, 0);
-    if (!f) throw std::runtime_error(std::format("open entry: {}", name));
+    const auto size = st.size;
+    std::string out;
+    out.resize(size);
+
+    if (st.comp_method == ZIP_CM_STORE) {
+        zip_file_t* f = zip_fopen(z, name, 0);
+        if (!f) throw std::runtime_error(std::format("open entry: {}", name));
+        std::size_t off = 0;
+        while (off < size) {
+            auto n = zip_fread(f, out.data() + off, size - off);
+            if (n <= 0) break;
+            off += static_cast<std::size_t>(n);
+        }
+        zip_fclose(f);
+        out.resize(off);
+        return out;
+    }
+
+    if (st.comp_method != ZIP_CM_DEFLATE) {
+        throw std::runtime_error(std::format(
+            "unsupported zip compression for {}: {}", name, st.comp_method));
+    }
+
+    // Read raw deflate stream, then inflate with libdeflate.
+    std::vector<unsigned char> compressed(st.comp_size);
+    zip_file_t* f = zip_fopen(z, name, ZIP_FL_COMPRESSED);
+    if (!f) throw std::runtime_error(std::format("open raw entry: {}", name));
     std::size_t off = 0;
-    while (off < size) {
-        auto n = zip_fread(f, buf.data() + off, size - off);
+    while (off < st.comp_size) {
+        auto n = zip_fread(f, compressed.data() + off, st.comp_size - off);
         if (n <= 0) break;
         off += static_cast<std::size_t>(n);
     }
     zip_fclose(f);
-    buf.resize(off);
-    return buf;
+    if (off != st.comp_size) {
+        throw std::runtime_error(std::format("short read on {}", name));
+    }
+
+    std::unique_ptr<libdeflate_decompressor, decltype(&libdeflate_free_decompressor)>
+        dec{libdeflate_alloc_decompressor(), &libdeflate_free_decompressor};
+    if (!dec) throw std::runtime_error("libdeflate_alloc_decompressor failed");
+
+    std::size_t actual = 0;
+    auto res = libdeflate_deflate_decompress(
+        dec.get(), compressed.data(), compressed.size(),
+        out.data(), size, &actual);
+    if (res != LIBDEFLATE_SUCCESS) {
+        throw std::runtime_error(std::format("libdeflate failed for {}: {}",
+                                             name, static_cast<int>(res)));
+    }
+    out.resize(actual);
+    return out;
 }
 
 // Iterate lines of a TSV (no embedded quoted newlines), skipping the header.
@@ -103,12 +145,12 @@ std::vector<string_view> header_fields(string_view text) {
 }  // namespace
 
 std::optional<std::uint16_t> WcaData::event_id(string_view name) const {
-    if (auto it = event_idx.find(std::string{name}); it != event_idx.end()) return it->second;
+    if (auto it = event_idx.find(name); it != event_idx.end()) return it->second;
     return std::nullopt;
 }
 
 std::optional<std::uint32_t> WcaData::person_key(string_view wca_id) const {
-    if (auto it = person_idx_by_wca_id.find(std::string{wca_id});
+    if (auto it = person_idx_by_wca_id.find(wca_id);
         it != person_idx_by_wca_id.end()) return it->second;
     return std::nullopt;
 }
@@ -170,18 +212,19 @@ WcaData load_wca(const std::filesystem::path& zip_path) {
         TsvLine t;
         for_each_data_line(body, [&](string_view line) {
             t.split(line);
-            auto wca_id = std::string{t.at(2)};
+            auto wca_id_v = t.at(2);
             auto sub_id = parse_int<std::uint16_t>(t.at(3), 1);
-            if (sub_id == 1) {
-                d.person_idx_by_wca_id.emplace(wca_id, static_cast<std::uint32_t>(d.persons.size()));
-            }
+            const std::uint32_t idx = static_cast<std::uint32_t>(d.persons.size());
             d.persons.push_back(Person{
-                .wca_id     = std::move(wca_id),
+                .wca_id     = std::string{wca_id_v},
                 .sub_id     = sub_id,
                 .name       = std::string{t.at(0)},
                 .country_id = std::string{t.at(4)},
                 .gender     = std::string{t.at(1)},
             });
+            if (sub_id == 1) {
+                d.person_idx_by_wca_id.emplace(d.persons.back().wca_id, idx);
+            }
         });
     }
 
@@ -200,10 +243,11 @@ WcaData load_wca(const std::filesystem::path& zip_path) {
         for_each_data_line(body, [&](string_view line) {
             t.split(line);
             if (t.fields.size() <= c_year) return;
-            auto id = std::string{t.at(c_id)};
+            auto id_v = t.at(c_id);
             auto year = parse_int<std::int32_t>(t.at(c_year), 0);
-            d.comp_idx_by_id.emplace(id, static_cast<std::uint32_t>(d.competitions.size()));
-            d.competitions.push_back(Competition{.id = std::move(id), .year = year});
+            const std::uint32_t idx = static_cast<std::uint32_t>(d.competitions.size());
+            d.competitions.push_back(Competition{.id = std::string{id_v}, .year = year});
+            d.comp_idx_by_id.emplace(d.competitions.back().id, idx);
         });
     }
 
@@ -223,18 +267,18 @@ WcaData load_wca(const std::filesystem::path& zip_path) {
             auto ev      = t.at(6);
             auto person  = t.at(8);
 
-            auto comp_it = d.comp_idx_by_id.find(std::string{comp_id});
+            auto comp_it = d.comp_idx_by_id.find(comp_id);
             if (comp_it == d.comp_idx_by_id.end()) return;
-            auto person_it = d.person_idx_by_wca_id.find(std::string{person});
+            auto person_it = d.person_idx_by_wca_id.find(person);
             if (person_it == d.person_idx_by_wca_id.end()) return;
 
             std::uint16_t eid;
-            if (auto eit = d.event_idx.find(std::string{ev}); eit != d.event_idx.end()) {
+            if (auto eit = d.event_idx.find(ev); eit != d.event_idx.end()) {
                 eid = eit->second;
             } else {
                 eid = static_cast<std::uint16_t>(d.events.size());
                 d.events.emplace_back(ev);
-                d.event_idx.emplace(std::string{ev}, eid);
+                d.event_idx.emplace(d.events.back(), eid);
             }
 
             d.results.push_back(Result333{

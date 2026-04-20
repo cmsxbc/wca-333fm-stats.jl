@@ -6,7 +6,8 @@ year-by-year statistics and emits byte-identical CSVs.
 
 ## Build
 
-Requires a C++23 compiler (tested with `g++ 15.2.1`) and `libzip`.
+Requires a C++23 compiler (tested with `g++ 15.2.1`), `libzip`, and
+`libdeflate` (used for faster inflate; falls back is not required).
 
 ```sh
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
@@ -54,19 +55,25 @@ Hardware: local workstation, `-O3 -flto`, best of 3 runs.
 
 | Implementation | Time   | Relative |
 |----------------|--------|----------|
-| Julia (original)  | ~128 s | 12.7×    |
-| Julia (optimized) | ~104 s | 10.3×    |
-| Rust (release)    | ~11.0 s | 1.09×   |
-| **C++23 (release)** | **~10.1 s** | **1.00×** |
+| Julia (original)  | ~128 s | 16.2×    |
+| Julia (optimized) | ~104 s | 13.2×    |
+| Rust (release)    | ~10.9 s | 1.38×   |
+| **C++23 (release)** | **~7.9 s** | **1.00×** |
 
-The C++ build is roughly **8 % faster than the optimized Rust port** on this
-workload. The remaining gap is dominated by:
+The C++ build is roughly **28 % faster than the optimized Rust port** on this
+workload. The gap is dominated by:
 
+* **libdeflate** for inflate (vs zlib in libzip's default build and vs
+  zlib-ng used by the Rust port). libdeflate is ~2× faster than zlib and
+  ~1.3–1.5× faster than zlib-ng on this export.
+* Transparent (heterogeneous) hash lookup on `std::string` maps keyed by
+  `std::string_view`, which avoids the `std::string` temporary allocation
+  the results loop used to pay for each of its millions of rows.
 * Plain `memcpy`-based buffered writes vs Rust's `BufWriter` + `write!` macros.
 * Fewer allocations in the per-person calc path (std::vector reuse vs fresh
   `Vec`/`AHashSet` allocation per row).
 * Aggressive LTO across 5 translation units.
 
-Both ports are single-threaded; load+parse is ~6.9 s of the total on the Rust
-side (after switching the `zip` crate to `zlib-ng` and replacing the `csv`
-crate with a hand-rolled `memchr` TSV parser) and ~7 s on the C++ side.
+Both ports are single-threaded. After switching to libdeflate, C++ load+parse
+is ~4.5 s of the total; Rust load+parse (with zlib-ng + a hand-rolled
+`memchr` TSV parser) is ~6.9 s.

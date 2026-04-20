@@ -12,6 +12,23 @@
 
 namespace wca {
 
+namespace detail {
+// Heterogeneous (transparent) hash/eq so find(string_view) avoids a temporary
+// std::string on every lookup.
+struct SvHash {
+    using is_transparent = void;
+    std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+    std::size_t operator()(const std::string& s) const noexcept { return std::hash<std::string_view>{}(s); }
+    std::size_t operator()(const char* s) const noexcept { return std::hash<std::string_view>{}(s); }
+};
+struct SvEq {
+    using is_transparent = void;
+    bool operator()(std::string_view a, std::string_view b) const noexcept { return a == b; }
+};
+template <class V>
+using string_map = std::unordered_map<std::string, V, SvHash, SvEq>;
+}  // namespace detail
+
 struct Person {
     std::string wca_id;
     std::uint16_t sub_id{};
@@ -44,13 +61,13 @@ struct Attempt {
 
 struct WcaData {
     std::vector<Person> persons;
-    std::unordered_map<std::string, std::uint32_t> person_idx_by_wca_id;
+    detail::string_map<std::uint32_t> person_idx_by_wca_id;
 
     std::vector<Competition> competitions;
-    std::unordered_map<std::string, std::uint32_t> comp_idx_by_id;
+    detail::string_map<std::uint32_t> comp_idx_by_id;
 
     std::vector<std::string> events;
-    std::unordered_map<std::string, std::uint16_t> event_idx;
+    detail::string_map<std::uint16_t> event_idx;
 
     std::vector<Result333> results;
     // For each result id, a vector of attempts sorted by attempt_number.
