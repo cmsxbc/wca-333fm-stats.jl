@@ -54,16 +54,19 @@ Hardware: local workstation, `-O3 -flto`, best of 3 runs.
 
 | Implementation | Time   | Relative |
 |----------------|--------|----------|
-| Julia (original)  | ~128 s | 12.6×    |
+| Julia (original)  | ~128 s | 12.7×    |
 | Julia (optimized) | ~104 s | 10.3×    |
-| Rust (release)    | ~14.1 s | 1.39×   |
+| Rust (release)    | ~11.0 s | 1.09×   |
 | **C++23 (release)** | **~10.1 s** | **1.00×** |
 
-The C++ build is roughly **29 % faster than the Rust port** on this workload.
-The gap is dominated by:
+The C++ build is roughly **8 % faster than the optimized Rust port** on this
+workload. The remaining gap is dominated by:
 
 * Plain `memcpy`-based buffered writes vs Rust's `BufWriter` + `write!` macros.
-* Fewer allocations in the hot path (std::vector reuse, positional TSV parse).
+* Fewer allocations in the per-person calc path (std::vector reuse vs fresh
+  `Vec`/`AHashSet` allocation per row).
 * Aggressive LTO across 5 translation units.
 
-Both ports are single-threaded; load+parse is ~7 s of the total (shared).
+Both ports are single-threaded; load+parse is ~6.9 s of the total on the Rust
+side (after switching the `zip` crate to `zlib-ng` and replacing the `csv`
+crate with a hand-rolled `memchr` TSV parser) and ~7 s on the C++ side.

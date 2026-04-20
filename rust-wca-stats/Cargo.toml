@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "2", default-features = false, features = ["deflate-zlib-ng"] }
 csv = "1"
 clap = { version = "4", features = ["derive"] }
 ahash = "0.8"

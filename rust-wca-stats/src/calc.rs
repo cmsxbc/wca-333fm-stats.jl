@@ -2,7 +2,7 @@
 
 use ahash::{AHashMap, AHashSet};
 
-use crate::loader::{Attempt, WcaData};
+use crate::loader::{WcaData};
 use crate::stats;
 
 #[derive(Clone, Copy)]

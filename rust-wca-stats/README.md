@@ -83,8 +83,11 @@ Full-export run on the same machine (input ≈ 353 MB zipped, 48 output CSVs):
 
 | Command | Julia | Rust | Speed-up |
 | --- | --- | --- | --- |
-| `default` (all years) | 128.4 s | 17.1 s | **~7.5×** |
-| `summary <id>` | ~148 s | ~25 s | ~5.9× |
+| `default` (all years) | 128.4 s | 11.0 s | **~11.7×** |
+| `summary <id>` | ~148 s | ~20 s | ~7.4× |
 
-Most of the Rust wall-time is spent in TSV decoding (≈ 15 s of 17 s); per-year
-compute + CSV write is 0.01–0.05 s each.
+The loader reads each zipped TSV into a single buffer (zlib-ng decompression)
+and parses it with a hand-rolled `memchr`-based splitter and a custom
+`FromDecimal` integer parser (no UTF-8 validation on the numeric hot path).
+Load time dropped from ≈ 9.8 s (with `csv` + `BufReader`) to ≈ 6.9 s. Per-year
+compute + CSV write is 0.01–0.2 s each.
