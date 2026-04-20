@@ -26,3 +26,4 @@ docs/site/
 
 # ignore wca exported result
 *.tsv.zip
+results/
