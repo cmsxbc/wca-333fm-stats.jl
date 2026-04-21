@@ -1,6 +1,6 @@
 // Per-year calculation of 3x3 FM statistics. Mirrors WCAStats.jl:calc().
 
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 
 use crate::loader::{WcaData};
 use crate::stats;
@@ -268,15 +268,18 @@ pub const DESC_ORDER: &[&str] = &[
     "gold", "silver", "bronze",
 ];
 
-pub fn rank_col_order() -> Vec<usize> {
-    let mut out: Vec<usize> = Vec::new();
-    for (i, (_, _, dir)) in COLS.iter().enumerate() {
-        if *dir == ColDir::Asc { out.push(i); }
-    }
-    for name in DESC_ORDER {
-        out.push(col_idx(name));
-    }
-    out
+pub fn rank_col_order() -> &'static [usize] {
+    static ORDER: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    ORDER.get_or_init(|| {
+        let mut out: Vec<usize> = Vec::with_capacity(COLS.len());
+        for (i, (_, _, dir)) in COLS.iter().enumerate() {
+            if *dir == ColDir::Asc { out.push(i); }
+        }
+        for name in DESC_ORDER {
+            out.push(col_idx(name));
+        }
+        out
+    }).as_slice()
 }
 
 #[derive(Clone)]
@@ -417,6 +420,9 @@ struct Scratch {
     worsts: Vec<i64>,
     medians: Vec<i64>,
     att_vs: Vec<i64>,
+    comp_keys: Vec<u32>,
+    tmp_i64: Vec<i64>,
+    tmp_f64: Vec<f64>,
     // Only the attempt `value` field (or None for missing-attempt result rows)
     // is actually read downstream, so we can skip the richer SingleRow struct.
     single_values: Vec<Option<i32>>,
@@ -433,13 +439,16 @@ impl Scratch {
         self.worsts.clear();
         self.medians.clear();
         self.att_vs.clear();
+        self.comp_keys.clear();
+        self.tmp_i64.clear();
+        self.tmp_f64.clear();
         self.single_values.clear();
     }
 }
 
 pub fn calc(data: &WcaData, event_id: u16, yf: YearFilter) -> Frame {
     // Step 1: filter results to event and year.
-    let mut kept: Vec<usize> = Vec::new(); // indices into data.results
+    let mut kept: Vec<usize> = Vec::with_capacity(data.results.len() / 16);
     for (i, r) in data.results.iter().enumerate() {
         if r.event_id != event_id { continue; }
         let y = data.competitions[r.comp_key as usize].year;
@@ -447,15 +456,24 @@ pub fn calc(data: &WcaData, event_id: u16, yf: YearFilter) -> Frame {
         kept.push(i);
     }
 
-    // Step 2: group by person_key -> list of result indices.
-    let mut by_person: AHashMap<u32, Vec<usize>> = AHashMap::new();
-    for &i in &kept {
-        by_person.entry(data.results[i].person_key).or_default().push(i);
+    // Step 2: group by person_key via a single scan (kept is already sorted by
+    // person_key because data.results was sorted during loading).
+    let mut person_slices: Vec<(u32, usize, usize)> = Vec::new();
+    if !kept.is_empty() {
+        let mut start = 0;
+        let mut cur_pk = data.results[kept[0]].person_key;
+        for i in 1..kept.len() {
+            let pk = data.results[kept[i]].person_key;
+            if pk != cur_pk {
+                person_slices.push((cur_pk, start, i));
+                start = i;
+                cur_pk = pk;
+            }
+        }
+        person_slices.push((cur_pk, start, kept.len()));
     }
-    // Julia's DataFrames join pipeline produces rows sorted by personId string,
-    // except persons not found in the sub_id==1 persons table are appended last
-    // (unmatched rightjoin rows) — also alphabetically among themselves.
-    let mut person_order: Vec<u32> = by_person.keys().copied().collect();
+
+    let mut person_order: Vec<u32> = person_slices.iter().map(|(pk, _, _)| *pk).collect();
     person_order.sort_by(|&a, &b| {
         let pa = &data.persons[a as usize];
         let pb = &data.persons[b as usize];
@@ -463,6 +481,9 @@ pub fn calc(data: &WcaData, event_id: u16, yf: YearFilter) -> Frame {
         let mb = data.person_idx_by_wca_id.contains_key(&pb.wca_id);
         mb.cmp(&ma).then_with(|| pa.wca_id.cmp(&pb.wca_id))
     });
+
+    let pk_to_slice: AHashMap<u32, (usize, usize)> =
+        person_slices.into_iter().map(|(pk, s, e)| (pk, (s, e))).collect();
 
     let mut rows: Vec<Row> = Vec::with_capacity(person_order.len());
     let mut scratch = Scratch::default();
@@ -475,7 +496,8 @@ pub fn calc(data: &WcaData, event_id: u16, yf: YearFilter) -> Frame {
             p.country_id.clone(),
             p.gender.clone(),
         );
-        compute_row(&mut row, data, pk, &by_person[&pk], &mut scratch);
+        let (start, end) = pk_to_slice[&pk];
+        compute_row(&mut row, data, pk, &kept[start..end], &mut scratch);
         rows.push(row);
     }
 
@@ -490,16 +512,17 @@ fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize], 
     sc.clear_all();
 
     // --- Round-level stats ---
-    let rs: Vec<&crate::loader::Result333> = idxs.iter().map(|&i| &data.results[i]).collect();
+    // data.results is sorted by (person_key, id), so idxs is already in id order.
 
-    // competitions (unique comp_keys)
-    let mut comp_set: AHashSet<u32> = AHashSet::new();
-    for r in &rs { comp_set.insert(r.comp_key); }
-    row.vals[ci.competitions] = Cell::Int(comp_set.len() as i64);
-    row.vals[ci.rounds] = Cell::Int(rs.len() as i64);
+    // competitions (unique comp_keys) — sort+dedup on scratch buffer avoids AHashSet alloc
+    for &i in idxs { sc.comp_keys.push(data.results[i].comp_key); }
+    sc.comp_keys.sort_unstable();
+    sc.comp_keys.dedup();
+    row.vals[ci.competitions] = Cell::Int(sc.comp_keys.len() as i64);
+    row.vals[ci.rounds] = Cell::Int(idxs.len() as i64);
 
     // best stats on best > 0
-    for r in &rs { if r.best > 0 { sc.bests.push(r.best as i64); } }
+    for &i in idxs { let r = &data.results[i]; if r.best > 0 { sc.bests.push(r.best as i64); } }
     if !sc.bests.is_empty() {
         let bests = &sc.bests;
         let (mn, mx) = extrema(bests);
@@ -516,24 +539,30 @@ fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize], 
         if let Some(v) = stats::trim_avg_i(bests) {
             row.vals[ci.best_avg] = Cell::Float(v);
         }
-        row.vals[ci.best_median] = Cell::Float(stats::median_f_from_i(bests));
-        let (mode, mc) = stats::mode_count_i(bests);
+        sc.tmp_i64.clear();
+        sc.tmp_i64.extend_from_slice(bests);
+        row.vals[ci.best_median] = Cell::Float(stats::median_f_from_i_in_place(&mut sc.tmp_i64));
+        sc.tmp_i64.clear();
+        sc.tmp_i64.extend_from_slice(bests);
+        let (mode, mc) = stats::mode_count_i_in_place(&mut sc.tmp_i64);
         row.vals[ci.best_mode] = Cell::Int(mode);
         row.vals[ci.best_mode_count] = Cell::Int(mc);
-        let (cc, cs, ce) = stats::calc_consecutive(bests, &[1]);
+        sc.tmp_i64.clear();
+        sc.tmp_i64.extend_from_slice(bests);
+        let (cc, cs, ce) = stats::calc_consecutive_in_place(&mut sc.tmp_i64, &[1]);
         row.vals[ci.best_consecutive] = Cell::Int(cc);
         row.vals[ci.best_consecutive_start] = Cell::Int(cs);
         row.vals[ci.best_consecutive_end] = Cell::Int(ce);
     }
 
     // average_attempts on average != 0
-    let avg_attempts = rs.iter().filter(|r| r.average != 0).count();
+    let avg_attempts = idxs.iter().filter(|&&i| data.results[i].average != 0).count();
     if avg_attempts > 0 {
         row.vals[ci.average_attempts] = Cell::Int(avg_attempts as i64);
     }
 
     // average stats on average > 0
-    for r in &rs { if r.average > 0 { sc.avgs_i.push(r.average as i64); } }
+    for &i in idxs { let r = &data.results[i]; if r.average > 0 { sc.avgs_i.push(r.average as i64); } }
     if !sc.avgs_i.is_empty() {
         sc.avgs_real.extend(sc.avgs_i.iter().map(|&v| v as f64 / 100.0));
         let avgs_i = &sc.avgs_i;
@@ -549,7 +578,9 @@ fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize], 
         row.vals[ci.average_nunique] = Cell::Int(sc.uniq.len() as i64);
         row.vals[ci.average_mean] = Cell::Float(stats::mean_f(avgs_real));
         row.vals[ci.average_std] = Cell::Float(stats::std_f(avgs_real));
-        if let Some(v) = stats::trim_avg_f(avgs_real) {
+        sc.tmp_f64.clear();
+        sc.tmp_f64.extend_from_slice(avgs_real);
+        if let Some(v) = stats::trim_avg_f_in_place(&mut sc.tmp_f64) {
             row.vals[ci.average_avg] = Cell::Float(v);
         }
         sc.avgs_sorted.extend_from_slice(avgs_real);
@@ -557,10 +588,14 @@ fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize], 
         let n = sc.avgs_sorted.len();
         let med = if n % 2 == 1 { sc.avgs_sorted[n/2] } else { (sc.avgs_sorted[n/2-1]+sc.avgs_sorted[n/2])/2.0 };
         row.vals[ci.average_median] = Cell::Float(med);
-        let (mode_i, mc) = stats::mode_count_i(avgs_i);
+        sc.tmp_i64.clear();
+        sc.tmp_i64.extend_from_slice(avgs_i);
+        let (mode_i, mc) = stats::mode_count_i_in_place(&mut sc.tmp_i64);
         row.vals[ci.average_mode] = Cell::Float(mode_i as f64 / 100.0);
         row.vals[ci.average_mode_count] = Cell::Int(mc);
-        let (cc, cs, ce) = stats::calc_consecutive(avgs_i, &[33, 34]);
+        sc.tmp_i64.clear();
+        sc.tmp_i64.extend_from_slice(avgs_i);
+        let (cc, cs, ce) = stats::calc_consecutive_in_place(&mut sc.tmp_i64, &[33, 34]);
         row.vals[ci.average_consecutive] = Cell::Int(cc);
         row.vals[ci.average_consecutive_start] = Cell::Float(cs as f64 / 100.0);
         row.vals[ci.average_consecutive_end] = Cell::Float(ce as f64 / 100.0);
@@ -569,8 +604,9 @@ fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize], 
     // medals: final rounds (f or c) with best > 0; count pos==1,2,3
     let (mut g, mut s, mut b) = (0i64, 0i64, 0i64);
     let mut any_final_best = false;
-    for r in &rs {
-        if r.best > 0 && (r.round_type_id == "f" || r.round_type_id == "c") {
+    for &i in idxs {
+        let r = &data.results[i];
+        if r.best > 0 && (r.round_type_id == b'f' || r.round_type_id == b'c') {
             any_final_best = true;
             match r.pos { 1 => g+=1, 2 => s+=1, 3 => b+=1, _ => {} }
         }
@@ -582,14 +618,12 @@ fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize], 
     }
 
     // --- Single attempts ---
-    // Sort rs in place by id for per-attempt iteration (attempts are already
-    // sorted by attempt_number per result).
-    let mut sorted_rs = rs;
-    sorted_rs.sort_by_key(|r| r.id);
+    // idxs is already in id order (data.results sorted by person_key then id).
 
     // Build single_values: one Option<i32> per (result_id, attempt_number)
     // row — None represents a result with no attempts (leftjoin pad).
-    for r in &sorted_rs {
+    for &i in idxs {
+        let r = &data.results[i];
         match data.attempts_by_result.get(&r.id) {
             Some(atts) if !atts.is_empty() => {
                 for a in atts { sc.single_values.push(Some(a.value)); }
@@ -620,14 +654,20 @@ fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize], 
         if let Some(v) = stats::trim_avg_i(solved) {
             row.vals[ci.solved_avg] = Cell::Float(v);
         }
-        row.vals[ci.solved_median] = Cell::Float(stats::median_f_from_i(solved));
-        let (mode, mc) = stats::mode_count_i(solved);
+        sc.tmp_i64.clear();
+        sc.tmp_i64.extend_from_slice(solved);
+        row.vals[ci.solved_median] = Cell::Float(stats::median_f_from_i_in_place(&mut sc.tmp_i64));
+        sc.tmp_i64.clear();
+        sc.tmp_i64.extend_from_slice(solved);
+        let (mode, mc) = stats::mode_count_i_in_place(&mut sc.tmp_i64);
         row.vals[ci.solved_mode] = Cell::Int(mode);
         row.vals[ci.solved_mode_count] = Cell::Int(mc);
         let (mn, mx) = extrema(solved);
         row.vals[ci.solved_min] = Cell::Int(mn);
         row.vals[ci.solved_max] = Cell::Int(mx);
-        let (cc, cs, ce) = stats::calc_consecutive(solved, &[1]);
+        sc.tmp_i64.clear();
+        sc.tmp_i64.extend_from_slice(solved);
+        let (cc, cs, ce) = stats::calc_consecutive_in_place(&mut sc.tmp_i64, &[1]);
         row.vals[ci.solved_consecutive] = Cell::Int(cc);
         row.vals[ci.solved_consecutive_start] = Cell::Int(cs);
         row.vals[ci.solved_consecutive_end] = Cell::Int(ce);
@@ -647,14 +687,17 @@ fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize], 
     }
 
     // --- avg_item_3rd/2nd ---
-    for r in &sorted_rs {
+    for &i in idxs {
+        let r = &data.results[i];
         if r.average <= 0 { continue; }
         if let Some(atts) = data.attempts_by_result.get(&r.id) {
             if atts.is_empty() { continue; }
             sc.att_vs.clear();
             for a in atts { sc.att_vs.push(a.value as i64); }
             sc.worsts.push(*sc.att_vs.iter().max().unwrap());
-            sc.medians.push(stats::median_i(&sc.att_vs));
+            sc.tmp_i64.clear();
+            sc.tmp_i64.extend_from_slice(&sc.att_vs);
+            sc.medians.push(stats::median_i_in_place(&mut sc.tmp_i64));
         }
     }
     if !sc.worsts.is_empty() {
@@ -693,10 +736,13 @@ fn compute_ranks(rows: &mut [Row]) {
             rows[i].ranks[ci] = r;
         }
     }
-    // national ranks: group by countryId
-    let mut by_country: AHashMap<String, Vec<usize>> = AHashMap::new();
+    // national ranks: group by countryId, cloning only on first insertion.
+    let mut by_country: AHashMap<String, Vec<usize>> = AHashMap::with_capacity(256);
     for (i, r) in rows.iter().enumerate() {
-        by_country.entry(r.country_id.clone()).or_default().push(i);
+        match by_country.get_mut(&r.country_id) {
+            Some(v) => v.push(i),
+            None => { by_country.insert(r.country_id.clone(), vec![i]); }
+        }
     }
     for ci in 0..COLS.len() {
         let dir = COLS[ci].2;

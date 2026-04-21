@@ -176,3 +176,63 @@ the loader regressed load time by 1–3 s.
 
 The output remains byte-identical to the committed `results-rust/` goldens
 (0/48 diffs via `cmp -s`).
+
+---
+
+## Follow-up 2 — structural memory-layout optimisations (Rust, 2026-04-21)
+
+Acting on the structural suggestions deferred above, a second round of changes
+targeted the working-set footprint and memory-access patterns:
+
+1. **`Result333::round_type_id` shrunk from `String` → `u8`.**
+   Rust's `String` has no small-string optimisation (SSO); every one-char
+   round-type string ("f", "c", "1" …) was a separate 24-byte heap allocation.
+   C++ `std::string` stores these inline via SSO. Replacing with a raw byte
+   eliminated millions of tiny allocations and reduced the struct size from
+   ~56 bytes to ~32 bytes.
+
+2. **Scratch-based in-place statistical helpers.**
+   `median_f_from_i`, `trim_avg_f`, `mode_count_i`, and `calc_consecutive` were
+   rewritten as `_in_place` variants that sort/dedup on caller-provided scratch
+   buffers instead of allocating fresh `Vec`s internally. This removed ~15
+   small allocations per person × ~20 k persons × 48 filters.
+
+3. **`rank_col_order()` cached in `OnceLock`.**
+   The 69-element ordering vector was previously rebuilt on every CSV-header
+   and every rank-column write.
+
+4. **`event_years` / `person_event_years` — `AHashSet` → boolean scan.**
+   Replaced hash-set deduplication with a `Vec<bool>` seen-array (C++ already
+   did this).
+
+5. **Sorted `data.results` by `(person_key, id)` during loading.**
+   This makes each person's results contiguous in memory. It enabled:
+   * Replacing the `by_person: AHashMap<u32, Vec<usize>>` in `calc()` with a
+     single linear scan of `kept`.
+   * Eliminating the per-person `rs: Vec<&Result333>` allocation.
+   * Removing the per-person `sorted_rs.sort_by_key(|r| r.id)` (now free).
+
+Before → after (best-of-3 clean pinned runs, full export, same machine):
+
+| Metric                 | Before (stable) | After (optimised) | Delta   |
+|------------------------|-----------------|-------------------|---------|
+| Wall time (clean)      | **10.67 s**     | **8.99 s**        | **−1.68 s** |
+| Cycles                 | 33.6 G          | 31.2 G            | −2.4 G  |
+| Instructions           | 57.8 G          | 56.1 G            | −1.7 G  |
+| **IPC**                | 1.72            | **1.80**          | **+0.08** |
+| L1 d-cache miss rate   | 3.78 %          | 3.00 %            | −0.78   |
+| LLC misses / 1k inst   | 3.97            | 3.26              | −0.71   |
+| dTLB load-miss rate    | 0.41 %          | 0.39 %            | −0.02   |
+| TopDown DRAM bound     | 31.7 %          | 28.3 %            | −3.4    |
+| TopDown backend bound  | 50.7 %          | 45.0 %            | −5.7    |
+
+Interpretation: the program is **still DRAM-bound**, but the bound dropped
+from 31.7 % to 28.3 % of slots. The `round_type_id` SSO fix and the sorted
+contiguous layout reduced LLC misses per kilo-instruction by **18 %** and
+pushed IPC up from 1.72 → 1.80. The remaining ~1.3 s gap vs C++ (~7.7 s)
+likely lives in `libzip`+`libdeflate` decompression (loader) and the
+`attempts_by_result: AHashMap<i64, Vec<Attempt>>` hash lookups in the hot
+`compute_row` path, both of which are harder to close without re-architecting
+the data model.
+
+The 48 output CSVs remain byte-identical to the C++ port (`diff -rq` clean).

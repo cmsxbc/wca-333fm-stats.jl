@@ -25,7 +25,7 @@ pub struct Result333 {
     pub best: i32,
     pub average: i32,
     pub comp_key: u32,
-    pub round_type_id: String,
+    pub round_type_id: u8,
     pub person_key: u32, // points into persons (sub_id==1 entry)
     pub event_id: u16,
 }
@@ -56,42 +56,42 @@ impl WcaData {
     }
 
     pub fn event_years(&self, event_id: u16) -> Vec<i32> {
-        let mut comp_ids: AHashSet<u32> = AHashSet::new();
+        let mut seen = vec![false; self.competitions.len()];
+        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
         for r in &self.results {
             if r.event_id == event_id {
-                comp_ids.insert(r.comp_key);
+                let cid = r.comp_key as usize;
+                if !seen[cid] {
+                    seen[cid] = true;
+                    let y = self.competitions[cid].year;
+                    if y < lo { lo = y; }
+                    if y > hi { hi = y; }
+                }
             }
         }
-        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
-        for cid in &comp_ids {
-            let y = self.competitions[*cid as usize].year;
-            if y < lo { lo = y; }
-            if y > hi { hi = y; }
-        }
-        (lo..=hi).collect()
+        if lo <= hi { (lo..=hi).collect() } else { Vec::new() }
     }
 
     pub fn person_event_years(&self, person_key: u32, event_id: u16) -> Vec<i32> {
-        let mut all_comp: AHashSet<u32> = AHashSet::new();
-        let mut person_comp: AHashSet<u32> = AHashSet::new();
+        let mut lo = i32::MAX;
+        let mut hi = i32::MIN;
+        let mut plo = i32::MAX;
         for r in &self.results {
             if r.event_id != event_id {
                 continue;
             }
-            all_comp.insert(r.comp_key);
+            let y = self.competitions[r.comp_key as usize].year;
+            lo = lo.min(y);
+            hi = hi.max(y);
             if r.person_key == person_key {
-                person_comp.insert(r.comp_key);
+                plo = plo.min(y);
             }
         }
-        let mut lo = i32::MAX;
-        for c in &person_comp {
-            lo = lo.min(self.competitions[*c as usize].year);
+        if plo != i32::MAX && lo <= hi {
+            (plo..=hi).collect()
+        } else {
+            Vec::new()
         }
-        let mut hi = i32::MIN;
-        for c in &all_comp {
-            hi = hi.max(self.competitions[*c as usize].year);
-        }
-        (lo..=hi).collect()
     }
 }
 
@@ -210,11 +210,15 @@ pub fn load_wca(zip_path: &Path) -> anyhow::Result<WcaData> {
                 best,
                 average,
                 comp_key,
-                round_type_id: round_type.to_string(),
+                round_type_id: round_type.as_bytes().first().copied().unwrap_or(0),
                 person_key,
                 event_id,
             });
         });
+        // Sort by person_key then id so that per-person slices are contiguous
+        // in memory.  This improves cache locality in calc and lets us skip
+        // the per-person sort that was previously done in compute_row.
+        results.sort_unstable_by_key(|r| (r.person_key, r.id));
     }
 
     // result_attempts: only keep attempts whose result_id is in the set of

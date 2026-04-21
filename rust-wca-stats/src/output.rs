@@ -16,8 +16,8 @@ pub fn write_csv(path: &Path, frame: &Frame) -> std::io::Result<()> {
     w.write_all(b"personId,personName,countryId,gender")?;
     for (n, _, _) in COLS { write!(w, ",{}", n)?; }
     let rank_order = rank_col_order();
-    for &i in &rank_order { write!(w, ",{}_rank", COLS[i].0)?; }
-    for &i in &rank_order { write!(w, ",{}_nr", COLS[i].0)?; }
+    for &i in rank_order { write!(w, ",{}_rank", COLS[i].0)?; }
+    for &i in rank_order { write!(w, ",{}_nr", COLS[i].0)?; }
     w.write_all(b"\n")?;
 
     let mut fbuf = ryu::Buffer::new();
@@ -38,12 +38,12 @@ pub fn write_csv(path: &Path, frame: &Frame) -> std::io::Result<()> {
             write_cell(&mut w, &row.vals[i], *kind, &mut fbuf, &mut ibuf)?;
         }
         // Rank cells (always integer or missing), asc-then-desc order
-        for &i in &rank_order {
+        for &i in rank_order {
             w.write_all(b",")?;
             write_cell(&mut w, &row.ranks[i], ColKind::Int, &mut fbuf, &mut ibuf)?;
         }
         // NR cells
-        for &i in &rank_order {
+        for &i in rank_order {
             w.write_all(b",")?;
             write_cell(&mut w, &row.nrs[i], ColKind::Int, &mut fbuf, &mut ibuf)?;
         }
@@ -215,8 +215,8 @@ pub fn write_summary_csv(
     w.write_all(b"personId,personName,countryId,gender")?;
     for (n, _, _) in COLS { write!(w, ",{}", n)?; }
     let rank_order = rank_col_order();
-    for &i in &rank_order { write!(w, ",{}_rank", COLS[i].0)?; }
-    for &i in &rank_order { write!(w, ",{}_nr", COLS[i].0)?; }
+    for &i in rank_order { write!(w, ",{}_rank", COLS[i].0)?; }
+    for &i in rank_order { write!(w, ",{}_nr", COLS[i].0)?; }
     w.write_all(b",year,category\n")?;
 
     let mut fbuf = ryu::Buffer::new();
@@ -233,11 +233,11 @@ pub fn write_summary_csv(
             w.write_all(b",")?;
             write_cell(&mut w, &row.vals[i], *kind, &mut fbuf, &mut ibuf)?;
         }
-        for &i in &rank_order {
+        for &i in rank_order {
             w.write_all(b",")?;
             write_cell(&mut w, &row.ranks[i], ColKind::Int, &mut fbuf, &mut ibuf)?;
         }
-        for &i in &rank_order {
+        for &i in rank_order {
             w.write_all(b",")?;
             write_cell(&mut w, &row.nrs[i], ColKind::Int, &mut fbuf, &mut ibuf)?;
         }

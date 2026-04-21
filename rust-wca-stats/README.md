@@ -83,12 +83,13 @@ Full-export run on the same machine (input ≈ 353 MB zipped, 48 output CSVs):
 
 | Command | Julia | Rust | Speed-up |
 | --- | --- | --- | --- |
-| `default` (all years) | 128.4 s | 10.6 s | **~12.1×** |
+| `default` (all years) | 128.4 s | **~9.0 s** | **~14.3×** |
 | `summary <id>` | ~148 s | ~20 s | ~7.4× |
 
-The Rust port now runs the full export in ~10.6 s; the C++23 port is faster
-still at ~7.9 s thanks to `libdeflate` and more cache-friendly allocation
-patterns (see [`cpp-wca-stats/README.md`](../cpp-wca-stats/README.md)).
+The Rust port now runs the full export in **~9.0 s** (down from ~10.6 s after
+structural optimisations); the C++23 port is faster still at ~7.9 s thanks to
+`libdeflate` and more cache-friendly allocation patterns
+(see [`cpp-wca-stats/README.md`](../cpp-wca-stats/README.md)).
 
 The loader reads each zipped TSV into a single buffer (zlib-ng decompression)
 and parses it with a hand-rolled `memchr`-based splitter and a custom
@@ -121,7 +122,32 @@ loader or changing any output byte:
 
 Net effect on the TopDown profile: L1-bound dropped from ~7 % → 4 %, total
 instructions retired fell from 57.8 G → 55.5 G, and wall time dropped 0.6 s.
-DRAM-bound % is unchanged (the working-set footprint is the same), so the
-remaining ~2.7 s gap vs C++ is still dominated by DRAM latency — further
-wins would need either a tighter layout for `Result333`/`Attempt` or a
-columnar recomputation that streams over attempts once per event filter.
+DRAM-bound % was unchanged (the working-set footprint was the same).
+
+### Structural memory-layout optimisations (2026-04-21)
+
+A second round targeted the working-set itself, cutting wall time from
+**10.60 s → ~9.0 s** while keeping output byte-identical to C++:
+
+* **`Result333::round_type_id` shrunk from `String` → `u8`.**
+  Rust `String` lacks small-string optimisation (SSO), so every one-char
+  round-type ("f", "c", "1" …) was a separate 24-byte heap allocation.
+  Replacing with a raw byte eliminated millions of allocations and halved
+  the struct size (~56 B → ~32 B).
+* **In-place statistical helpers.**
+  `median_f_from_i`, `trim_avg_f`, `mode_count_i`, and `calc_consecutive`
+  gained `_in_place` variants that sort/dedup on caller-provided scratch
+  buffers, removing ~15 small allocations per person.
+* **`rank_col_order()` cached in `OnceLock`.**
+* **`event_years` / `person_event_years` — `AHashSet` → boolean scan.**
+* **Sorted `data.results` by `(person_key, id)` during loading.**
+  This makes per-person slices contiguous in memory, enabling:
+  * Replacement of the `by_person: AHashMap<u32, Vec<usize>>` with a single
+    linear scan of `kept`.
+  * Elimination of the per-person `rs: Vec<&Result333>` allocation.
+  * Removal of the per-person `sorted_rs.sort_by_key(|r| r.id)` (now free).
+
+Net effect: DRAM-bound dropped from 31.7 % → 28.3 %, LLC misses per
+kilo-instruction fell 18 %, and IPC rose from 1.72 → 1.80. The remaining
+~1.3 s gap vs C++ (~7.9 s) likely lives in `libzip`+`libdeflate`
+differences in the loader and the `attempts_by_result` hash lookups.
