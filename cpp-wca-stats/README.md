@@ -57,10 +57,10 @@ Hardware: local workstation, `-O3 -flto`, best of 3 runs.
 |----------------|--------|----------|
 | Julia (original)  | ~128 s | 16.2×    |
 | Julia (optimized) | ~104 s | 13.2×    |
-| Rust (release)    | ~10.9 s | 1.38×   |
+| Rust (release)    | **~10.6 s** | **1.34×**   |
 | **C++23 (release)** | **~7.9 s** | **1.00×** |
 
-The C++ build is roughly **28 % faster than the optimized Rust port** on this
+The C++ build is roughly **25 % faster than the optimized Rust port** on this
 workload. The gap is dominated by:
 
 * **libdeflate** for inflate (vs zlib in libzip's default build and vs
@@ -76,4 +76,6 @@ workload. The gap is dominated by:
 
 Both ports are single-threaded. After switching to libdeflate, C++ load+parse
 is ~4.5 s of the total; Rust load+parse (with zlib-ng + a hand-rolled
-`memchr` TSV parser) is ~6.9 s.
+`memchr` TSV parser) is ~7.2 s. Recent calc-path micro-optimisations in the
+Rust port (precomputed `ColIdx` + `Scratch` buffer reuse) cut an additional
+0.6 s without changing the output or the loader.
