@@ -1,490 +1,1554 @@
 module WCAStats
 
 import Base
-import StatsBase
-import CSV
-import DataAPI
-import DataFrames
-import ZipFile
-import RollingFunctions
-import Printf
 import ArgParse
-import Profile
-import PProf
+import ZipFile
+import Printf
 
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+struct Person
+    wca_id::String
+    sub_id::UInt16
+    name::String
+    country_id::String
+    gender::String
+end
+
+struct Competition
+    id::String
+    year::Int32
+end
+
+struct Result333
+    id::Int64
+    pos::Int32
+    best::Int32
+    average::Int32
+    comp_key::UInt32
+    round_type_id::UInt8
+    person_key::UInt32
+    event_id::UInt16
+end
+
+struct Attempt
+    result_id::Int64
+    attempt_number::UInt8
+    value::Int32
+end
+
+struct WcaData
+    persons::Vector{Person}
+    person_idx_by_wca_id::Dict{String, UInt32}
+    competitions::Vector{Competition}
+    comp_idx_by_id::Dict{String, UInt32}
+    events::Vector{String}
+    event_idx::Dict{String, UInt16}
+    results::Vector{Result333}
+    attempts_by_result::Dict{Int64, Vector{Attempt}}
+end
+
+function event_id(data::WcaData, name::String)
+    get(data.event_idx, name, nothing)
+end
+
+function person_key(data::WcaData, wca_id::String)
+    get(data.person_idx_by_wca_id, wca_id, nothing)
+end
+
+function event_years(data::WcaData, event_id::UInt16)
+    seen = falses(length(data.competitions))
+    lo = typemax(Int32)
+    hi = typemin(Int32)
+    for r in data.results
+        r.event_id != event_id && continue
+        cid = r.comp_key
+        if !seen[cid]
+            seen[cid] = true
+            y = data.competitions[cid].year
+            y < lo && (lo = y)
+            y > hi && (hi = y)
+        end
+    end
+    lo <= hi ? collect(Int32, lo:hi) : Int32[]
+end
+
+function person_event_years(data::WcaData, person_key::UInt32, event_id::UInt16)
+    lo = typemax(Int32)
+    hi = typemin(Int32)
+    plo = typemax(Int32)
+    for r in data.results
+        r.event_id != event_id && continue
+        y = data.competitions[r.comp_key].year
+        lo = min(lo, y)
+        hi = max(hi, y)
+        r.person_key == person_key && (plo = min(plo, y))
+    end
+    plo != typemax(Int32) && lo <= hi ? collect(Int32, plo:hi) : Int32[]
+end
+
+# ---------------------------------------------------------------------------
+# Fast byte-level TSV helpers
+# ---------------------------------------------------------------------------
+
+function fast_str(buf, l::Int, r::Int)::String
+    len = r - l + 1
+    len <= 0 && return ""
+    @inbounds unsafe_string(pointer(buf, l), len)
+end
+
+function next_tab(buf, l::Int, line_stop::Int)::Union{Int,Nothing}
+    r = findnext(==(UInt8('\t')), buf, l)
+    (r === nothing || r > line_stop) ? nothing : r
+end
+
+function parse_int(::Type{T}, buf, l::Int, r::Int)::Union{T,Nothing} where T <: Integer
+    r < l && return nothing
+    i = l
+    @inbounds neg = buf[i] == UInt8('-')
+    if neg || buf[i] == UInt8('+')
+        i += 1
+        i > r && return nothing
+    end
+    n = zero(T)
+    @inbounds while i <= r
+        b = buf[i]
+        if b < UInt8('0') || b > UInt8('9')
+            return nothing
+        end
+        n = n * T(10) + T(b - UInt8('0'))
+        i += 1
+    end
+    return neg ? -n : n
+end
+
+function header_col(hdr, name::String)::Union{Int,Nothing}
+    l = 1
+    col = 0
+    len = length(hdr)
+    @inbounds while l <= len
+        r = findnext(==(UInt8('\t')), hdr, l)
+        if r === nothing
+            r = len + 1
+        end
+        if fast_str(hdr, l, r - 1) == name
+            return col
+        end
+        l = r + 1
+        col += 1
+    end
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# Loaders
+# ---------------------------------------------------------------------------
+
+function parse_persons(buf)
+    p = findnext(==(UInt8('\n')), buf, 1)
+    pos = p === nothing ? length(buf) + 1 : p + 1
+    persons = Vector{Person}()
+    person_idx = Dict{String, UInt32}()
+    sizehint!(persons, 300_000)
+    len = length(buf)
+    @inbounds while pos <= len
+        line_end = findnext(==(UInt8('\n')), buf, pos)
+        line_end === nothing && (line_end = len + 1)
+        line_stop = line_end - 1
+        if line_stop >= pos && buf[line_stop] == UInt8('\r')
+            line_stop -= 1
+        end
+        line_stop < pos && (pos = line_end + 1; continue)
+
+        l = pos
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        name = fast_str(buf, l, r - 1); l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        gender = fast_str(buf, l, r - 1); l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        wca_id = fast_str(buf, l, r - 1); l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        sub_id = parse_int(UInt16, buf, l, r - 1)
+        sub_id === nothing && (sub_id = UInt16(1))
+        l = r + 1
+        r = next_tab(buf, l, line_stop)
+        if r === nothing
+            country_id = fast_str(buf, l, line_stop)
+        else
+            country_id = fast_str(buf, l, r - 1)
+        end
+
+        if sub_id == 1
+            person_idx[wca_id] = UInt32(length(persons) + 1)
+        end
+        push!(persons, Person(wca_id, sub_id, name, country_id, gender))
+        pos = line_end + 1
+    end
+    persons, person_idx
+end
+
+function parse_competitions(buf)
+    p = findnext(==(UInt8('\n')), buf, 1)
+    pos = p === nothing ? length(buf) + 1 : p + 1
+    hdr = @view buf[1:(p === nothing ? length(buf) : p - 1)]
+    id_col = header_col(hdr, "id")
+    year_col = header_col(hdr, "year")
+    max_col = max(id_col, year_col)
+
+    competitions = Vector{Competition}()
+    comp_idx = Dict{String, UInt32}()
+    sizehint!(competitions, 20_000)
+    len = length(buf)
+
+    @inbounds while pos <= len
+        line_end = findnext(==(UInt8('\n')), buf, pos)
+        line_end === nothing && (line_end = len + 1)
+        line_stop = line_end - 1
+        if line_stop >= pos && buf[line_stop] == UInt8('\r')
+            line_stop -= 1
+        end
+        line_stop < pos && (pos = line_end + 1; continue)
+
+        l = pos
+        fields = Vector{UnitRange{Int}}()
+        col = 0
+        while l <= line_stop && col <= max_col
+            r = findnext(==(UInt8('\t')), buf, l)
+            if r === nothing || r > line_stop + 1
+                push!(fields, l:line_stop)
+                col += 1
+                break
+            else
+                push!(fields, l:(r - 1))
+                l = r + 1
+                col += 1
+            end
+        end
+        length(fields) <= max_col && (pos = line_end + 1; continue)
+
+        id = fast_str(buf, fields[id_col + 1].start, fields[id_col + 1].stop)
+        year = parse_int(Int32, buf, fields[year_col + 1].start, fields[year_col + 1].stop)
+        year === nothing && (year = Int32(0))
+        comp_idx[id] = UInt32(length(competitions) + 1)
+        push!(competitions, Competition(id, year))
+        pos = line_end + 1
+    end
+    competitions, comp_idx
+end
+
+function parse_results(buf, comp_idx, person_idx)
+    p = findnext(==(UInt8('\n')), buf, 1)
+    pos = p === nothing ? length(buf) + 1 : p + 1
+    results = Vector{Result333}()
+    sizehint!(results, 6_500_000)
+    events = Vector{String}()
+    event_idx = Dict{String, UInt16}()
+    len = length(buf)
+
+    @inbounds while pos <= len
+        line_end = findnext(==(UInt8('\n')), buf, pos)
+        line_end === nothing && (line_end = len + 1)
+        line_stop = line_end - 1
+        if line_stop >= pos && buf[line_stop] == UInt8('\r')
+            line_stop -= 1
+        end
+        line_stop < pos && (pos = line_end + 1; continue)
+
+        l = pos
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        id = parse_int(Int64, buf, l, r - 1); id === nothing && (pos = line_end + 1; continue)
+        l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        pos_val = parse_int(Int32, buf, l, r - 1); pos_val === nothing && (pos_val = Int32(0))
+        l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        best = parse_int(Int32, buf, l, r - 1); best === nothing && (best = Int32(0))
+        l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        average = parse_int(Int32, buf, l, r - 1); average === nothing && (average = Int32(0))
+        l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        comp_id = fast_str(buf, l, r - 1); l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        round_type = buf[l]
+        l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        ev = fast_str(buf, l, r - 1); l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        l = r + 1  # skip person_name
+        r = next_tab(buf, l, line_stop)
+        if r === nothing
+            person_id = fast_str(buf, l, line_stop)
+        else
+            person_id = fast_str(buf, l, r - 1)
+        end
+
+        comp_key = get(comp_idx, comp_id, nothing)
+        comp_key === nothing && (pos = line_end + 1; continue)
+        pk = get(person_idx, person_id, nothing)
+        pk === nothing && (pos = line_end + 1; continue)
+
+        eid = get(event_idx, ev, nothing)
+        if eid === nothing
+            eid = UInt16(length(events) + 1)
+            push!(events, ev)
+            event_idx[ev] = eid
+        end
+
+        push!(results, Result333(id, pos_val, best, average, comp_key, round_type, pk, eid))
+        pos = line_end + 1
+    end
+    sort!(results, by=r->(r.person_key, r.id))
+    results, events, event_idx
+end
+
+function parse_attempts(buf, wanted)
+    p = findnext(==(UInt8('\n')), buf, 1)
+    pos = p === nothing ? length(buf) + 1 : p + 1
+    attempts_by_result = Dict{Int64, Vector{Attempt}}()
+    sizehint!(attempts_by_result, length(wanted))
+    len = length(buf)
+    @inbounds while pos <= len
+        line_end = findnext(==(UInt8('\n')), buf, pos)
+        line_end === nothing && (line_end = len + 1)
+        line_stop = line_end - 1
+        if line_stop >= pos && buf[line_stop] == UInt8('\r')
+            line_stop -= 1
+        end
+        line_stop < pos && (pos = line_end + 1; continue)
+
+        l = pos
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        value = parse_int(Int32, buf, l, r - 1); value === nothing && (pos = line_end + 1; continue)
+        l = r + 1
+        r = next_tab(buf, l, line_stop); r === nothing && (pos = line_end + 1; continue)
+        attempt_number = parse_int(UInt8, buf, l, r - 1); attempt_number === nothing && (pos = line_end + 1; continue)
+        l = r + 1
+        result_id = parse_int(Int64, buf, l, line_stop); result_id === nothing && (pos = line_end + 1; continue)
+
+        if result_id in wanted
+            vec = get!(Vector{Attempt}, attempts_by_result, result_id)
+            push!(vec, Attempt(result_id, attempt_number, value))
+        end
+        pos = line_end + 1
+    end
+    for v in values(attempts_by_result)
+        sort!(v, by=a->a.attempt_number)
+    end
+    attempts_by_result
+end
 
 function load_wca(zip_path)
-    d = Dict()
+    occursin("WCA_export_v2_", zip_path) || return nothing
     z = ZipFile.Reader(zip_path)
-    if !occursin("WCA_export_v2_", zip_path)
-        return missing
+    local persons_buf, comps_buf, results_buf, attempts_buf
+    for f in z.files
+        if f.name == "WCA_export_persons.tsv"
+            persons_buf = read(f)
+        elseif f.name == "WCA_export_competitions.tsv"
+            comps_buf = read(f)
+        elseif f.name == "WCA_export_results.tsv"
+            results_buf = read(f)
+        elseif f.name == "WCA_export_result_attempts.tsv"
+            attempts_buf = read(f)
+        end
     end
-    for name in ["persons", "results", "result_attempts", "competitions"]
-        filename = "WCA_export_" * name * ".tsv"
-        d[name] = CSV.read(read(z.files[findfirst(x -> x.name == filename, z.files)]), DataFrames.DataFrame)
+    close(z)
+    persons_buf === nothing && return nothing
+    comps_buf === nothing && return nothing
+    results_buf === nothing && return nothing
+    attempts_buf === nothing && return nothing
+
+    persons, person_idx = parse_persons(persons_buf)
+    competitions, comp_idx = parse_competitions(comps_buf)
+    results, events, event_idx = parse_results(results_buf, comp_idx, person_idx)
+    wanted = Set(r.id for r in results)
+    attempts_by_result = parse_attempts(attempts_buf, wanted)
+    WcaData(persons, person_idx, competitions, comp_idx, events, event_idx, results, attempts_by_result)
+end
+
+
+# ---------------------------------------------------------------------------
+# Statistical helpers (matching Rust / Julia semantics)
+# ---------------------------------------------------------------------------
+
+function trim_avg_i(xs::Vector{Int64})::Union{Float64,Nothing}
+    n = length(xs)
+    n <= 2 && return nothing
+    s = Int128(0)
+    mn = typemax(Int64)
+    mx = typemin(Int64)
+    for v in xs
+        s += v
+        v < mn && (mn = v)
+        v > mx && (mx = v)
     end
-    return d
+    Float64(s - mn - mx) / (n - 2)
 end
 
+function trim_avg_f!(buf::Vector{Float64})::Union{Float64,Nothing}
+    n = length(buf)
+    n <= 2 && return nothing
+    sort!(buf)
+    pairwise_sum_f(@view buf[2:n-1]) / (n - 2)
+end
 
-function get_event_result(wca_dict, event_id, year_filter)
-    df = filter(:event_id => ==(event_id), wca_dict["results"])
-    if year_filter !== missing
-        comp_df = filter(:year => year_filter, wca_dict["competitions"])
-        df = filter(:competition_id => ∈(comp_df[!, "id"]), df)
+function mean_i(xs::Vector{Int64})
+    s = Int128(0)
+    for v in xs
+        s += v
     end
-    return DataFrames.rename(
-        df,
-        :competition_id => :competitionId,
-        :person_id => :personId,
-        :round_type_id => :roundTypeId
-    )
+    Float64(s) / length(xs)
 end
 
-
-# Precompute an event-scoped results frame joined with competition years.
-# This lets per-year filters be a simple comparison against an integer column
-# instead of a two-step (competitions->ids->results) filter.
-function prepare_event_results(wca_dict, event_id)
-    df = filter(:event_id => ==(event_id), wca_dict["results"])
-    comp_years = DataFrames.select(wca_dict["competitions"], :id, :year)
-    df = DataFrames.leftjoin(df, comp_years, on=:competition_id => :id)
-    return DataFrames.rename(
-        df,
-        :competition_id => :competitionId,
-        :person_id => :personId,
-        :round_type_id => :roundTypeId,
-    )
-end
-
-
-# Precompute persons[sub_id==1] projected/renamed to calc's join shape.
-function prepare_persons(wca_dict)
-    return DataFrames.rename(
-        filter(:sub_id => ==(1), wca_dict["persons"])[!, [:wca_id, :name, :country_id, :gender]],
-        :wca_id => :personId,
-        :name => :personName,
-        :country_id => :countryId,
-    )
-end
-
-
-function get_event_years(wca_dict, event_id)
-    event_competition_ids = DataFrames.unique(filter(:event_id => ==(event_id), wca_dict["results"])[!, :competition_id])
-    year_df = DataFrames.combine(
-        filter(:id => ∈(event_competition_ids), wca_dict["competitions"]),
-        :year => (x -> x |> extrema |> vcat) => [:year_min, :year_max]
-    )
-    return year_df[1, :year_min]:year_df[1, :year_max]
-end
-
-
-function get_person_event_years(wca_dict, person_id, event_id)
-    event_df = filter(:event_id => ==(event_id), wca_dict["results"])
-    event_competition_ids = DataFrames.unique(event_df[!, :competition_id])
-    person_event_df = filter(:person_id => ==(person_id), event_df)
-    person_competition_ids = DataFrames.unique(person_event_df[!, :competition_id])
-    year_min = minimum(filter(:id => ∈(person_competition_ids), wca_dict["competitions"])[!, :year])
-    year_max = maximum(filter(:id => ∈(event_competition_ids), wca_dict["competitions"])[!, :year])
-    return year_min:year_max
-end
-
-
-function get_single_res_df(wca_dict, event_df)
-    return sort(
-        DataFrames.leftjoin(
-            event_df, wca_dict["result_attempts"],
-            on=:id => :result_id,
-            makeunique=true,
-        ),
-        [:id, :attempt_number]
-    )
-end
-
-
-nunique = length ∘ DataFrames.unique
-
-
-function avg(xs)
-    l = length(xs)
-    if l > 2
-        return (sum(xs) - sum(extrema(xs))) / (l - 2)
-    else
-        return missing
+function pairwise_sum_f(xs::AbstractVector{Float64})::Float64
+    n = length(xs)
+    if n <= 16
+        s = 0.0
+        for v in xs
+            s += v
+        end
+        return s
     end
+    m = n ÷ 2
+    pairwise_sum_f(@view xs[1:m]) + pairwise_sum_f(@view xs[m+1:n])
 end
 
-
-function mode_count(xs)
-    modes = sort(StatsBase.modes(xs))
-    return [(modes[1], count(==(modes[1]), xs))]
+function sum_f(xs::Vector{Float64})
+    pairwise_sum_f(xs)
 end
 
+function mean_f(xs::Vector{Float64})
+    s = 0.0
+    for v in xs
+        s += v
+    end
+    s / length(xs)
+end
 
-function calc_consecutive(xs, diffs)
-    xs = sort(unique(xs))
-    cstart = xs[1]
-    cend = xs[1]
+function std_i(xs::Vector{Int64})
+    n = length(xs)
+    n < 2 && return NaN
+    m = mean_i(xs)
+    s = 0.0
+    for v in xs
+        d = Float64(v) - m
+        s += d * d
+    end
+    sqrt(s / (n - 1))
+end
+
+function std_f(xs::Vector{Float64})
+    n = length(xs)
+    n < 2 && return NaN
+    m = mean_f(xs)
+    s = 0.0
+    for v in xs
+        d = v - m
+        s += d * d
+    end
+    sqrt(s / (n - 1))
+end
+
+function median_f_from_i!(buf::Vector{Int64})::Float64
+    sort!(buf)
+    n = length(buf)
+    isodd(n) ? Float64(buf[(n + 1) ÷ 2]) : (buf[n ÷ 2] + buf[n ÷ 2 + 1]) / 2.0
+end
+
+function median_i!(buf::Vector{Int64})::Int64
+    sort!(buf)
+    n = length(buf)
+    isodd(n) ? buf[(n + 1) ÷ 2] : (buf[n ÷ 2] + buf[n ÷ 2 + 1]) ÷ 2
+end
+
+function mode_count_i!(buf::Vector{Int64})::Tuple{Int64,Int64}
+    sort!(buf)
+    best_val = buf[1]
+    best_cnt = 1
+    cur_val = buf[1]
+    cur_cnt = 1
+    for i in 2:length(buf)
+        if buf[i] == cur_val
+            cur_cnt += 1
+        else
+            if cur_cnt > best_cnt
+                best_cnt = cur_cnt
+                best_val = cur_val
+            end
+            cur_val = buf[i]
+            cur_cnt = 1
+        end
+    end
+    if cur_cnt > best_cnt
+        best_cnt = cur_cnt
+        best_val = cur_val
+    end
+    best_val, best_cnt
+end
+
+function calc_consecutive!(buf::Vector{Int64}, diffs::Vector{Int64})::Tuple{Int64,Int64,Int64}
+    sort!(buf)
+    # dedup in-place
+    j = 2
+    for i in 2:length(buf)
+        if buf[i] != buf[j - 1]
+            buf[j] = buf[i]
+            j += 1
+        end
+    end
+    ulen = j - 1
     ccount = 1
+    cstart = buf[1]
+    cend = buf[1]
     cur_count = 1
-    cur_start = xs[1]
-    cur_end = xs[1]
-    for i in 2:length(xs)
-        if (xs[i] - xs[i-1]) in diffs
+    cur_start = buf[1]
+    for i in 2:ulen
+        d = buf[i] - buf[i - 1]
+        if d in diffs
             cur_count += 1
         else
             if cur_count > ccount
                 ccount = cur_count
                 cstart = cur_start
-                cend = xs[i-1]
+                cend = buf[i - 1]
             end
             cur_count = 1
-            cur_start = xs[i]
-            cur_end = xs[i]
+            cur_start = buf[i]
         end
     end
     if cur_count > ccount
         ccount = cur_count
         cstart = cur_start
-        cend = xs[end]
+        cend = buf[ulen]
     end
-    return [(ccount, cstart, cend)]
+    ccount, cstart, cend
 end
 
-
-function calc_rolling_mean(n, xs)
-    if length(xs) < n
-        return [(missing, missing)]
-    else
-        results = RollingFunctions.rollmean(xs, n)
-        return [(results[end], minimum(results))]
+function rolling_mean(xs::Vector{Int64}, n::Int)::Union{Tuple{Float64,Float64},Nothing}
+    m = length(xs)
+    m < n && return nothing
+    denom = Float64(n)
+    s = Int128(0)
+    for i in 1:n
+        s += xs[i]
     end
-end
-
-
-function calc_rolling_avg(n, xs)
-    if length(xs) < n
-        return [(missing, missing)]
-    else
-        results = RollingFunctions.rolling(avg, xs, n)
-        return [(results[end], minimum(results))]
+    first_val = Float64(s) / denom
+    min_val = first_val
+    last_val = first_val
+    for i in (n + 1):m
+        s += xs[i] - xs[i - n]
+        last_val = Float64(s) / denom
+        last_val < min_val && (min_val = last_val)
     end
+    last_val, min_val
 end
 
-
-function stats_single_result(df, id_col, res_col)
-    chances_df = DataFrames.combine(DataFrames.groupby(df, id_col), DataFrames.nrow => :chances)
-    attempts_df = DataFrames.combine(DataFrames.groupby(filter(res_col => x -> x > -2, df), id_col), DataFrames.nrow => :attempts)
-    solved_df = DataFrames.combine(
-        DataFrames.groupby(filter(res_col => x -> x > 0, df), id_col),
-        DataFrames.nrow => :solved_count,
-        res_col => nunique => :solved_nunique,
-        res_col => DataFrames.mean => :solved_mean,
-        res_col => DataFrames.std => :solved_std,
-        res_col => avg => :solved_avg,
-        res_col => DataFrames.median => :solved_median,
-        res_col => mode_count => [:solved_mode, :solved_mode_count],
-        # res_col => (x -> [extrema(x)]) => [:solved_min, :solved_max],
-        res_col => (x -> x |> extrema |> vcat) => [:solved_min, :solved_max],
-        res_col => Base.Fix2(calc_consecutive, [1]) => [:solved_consecutive, :solved_consecutive_start, :solved_consecutive_end],
-        res_col => Base.Fix1(calc_rolling_mean, 3) => [:solved_mo3_last, :solved_mo3_best],
-        res_col => Base.Fix1(calc_rolling_mean, 5) => [:solved_mo5_last, :solved_mo5_best],
-        res_col => Base.Fix1(calc_rolling_mean, 12) => [:solved_mo12_last, :solved_mo12_best],
-        res_col => Base.Fix1(calc_rolling_mean, 50) => [:solved_mo50_last, :solved_mo50_best],
-        res_col => Base.Fix1(calc_rolling_mean, 100) => [:solved_mo100_last, :solved_mo100_best],
-        res_col => Base.Fix1(calc_rolling_avg, 5) => [:solved_ao5_last, :solved_ao5_best],
-        res_col => Base.Fix1(calc_rolling_avg, 12) => [:solved_ao12_last, :solved_ao12_best],
-        res_col => Base.Fix1(calc_rolling_avg, 50) => [:solved_ao50_last, :solved_ao50_best],
-        res_col => Base.Fix1(calc_rolling_avg, 100) => [:solved_ao100_last, :solved_ao100_best],
-    )
-    return DataFrames.leftjoin(DataFrames.leftjoin(chances_df, attempts_df, on=id_col), solved_df, on=id_col)
+function rolling_trim_avg(xs::Vector{Int64}, n::Int)::Union{Tuple{Float64,Float64},Nothing}
+    m = length(xs)
+    (m < n || n <= 2) && return nothing
+    denom = Float64(n - 2)
+    last_val = 0.0
+    min_val = Inf
+    window = Vector{Int64}(undef, n)
+    for i in n:m
+        for j in 1:n
+            window[j] = xs[i - n + j]
+        end
+        s = Int128(0)
+        mn = typemax(Int64)
+        mx = typemin(Int64)
+        for v in window
+            s += v
+            v < mn && (mn = v)
+            v > mx && (mx = v)
+        end
+        avg = Float64(s - mn - mx) / denom
+        last_val = avg
+        avg < min_val && (min_val = avg)
+    end
+    last_val, min_val
 end
 
+function extrema_i(xs::Vector{Int64})::Tuple{Int64,Int64}
+    mn = xs[1]
+    mx = xs[1]
+    for i in 2:length(xs)
+        v = xs[i]
+        v < mn && (mn = v)
+        v > mx && (mx = v)
+    end
+    mn, mx
+end
 
-function stats_round_result(df, id_col)
-    rdf = DataFrames.combine(
-        DataFrames.groupby(df, id_col),
-        :competitionId => nunique => :competitions,
-        DataFrames.nrow => :rounds,
+function extrema_f(xs::Vector{Float64})::Tuple{Float64,Float64}
+    mn = xs[1]
+    mx = xs[1]
+    for i in 2:length(xs)
+        v = xs[i]
+        v < mn && (mn = v)
+        v > mx && (mx = v)
+    end
+    mn, mx
+end
+
+function copy_to_scratch!(dest::Vector{T}, src::AbstractVector{T})::Vector{T} where T
+    resize!(dest, length(src))
+    copyto!(dest, src)
+    dest
+end
+
+# ---------------------------------------------------------------------------
+# Column schema (69 value columns)
+# ---------------------------------------------------------------------------
+
+const COLS = [
+    ("competitions",              :Int,   :Desc),
+    ("rounds",                    :Int,   :Desc),
+    ("best",                      :Int,   :Asc),
+    ("best_max",                  :Int,   :Asc),
+    ("best_count",                :Int,   :Desc),
+    ("best_nunique",              :Int,   :Desc),
+    ("best_mean",                 :Float, :Asc),
+    ("best_std",                  :Float, :Asc),
+    ("best_avg",                  :Float, :Asc),
+    ("best_median",               :Float, :Asc),
+    ("best_mode",                 :Int,   :Asc),
+    ("best_mode_count",           :Int,   :Desc),
+    ("best_consecutive",          :Int,   :Desc),
+    ("best_consecutive_start",    :Int,   :Asc),
+    ("best_consecutive_end",      :Int,   :Asc),
+    ("average_attempts",          :Int,   :Desc),
+    ("average",                   :Float, :Asc),
+    ("average_max",               :Float, :Asc),
+    ("average_count",             :Int,   :Desc),
+    ("average_nunique",           :Int,   :Desc),
+    ("average_mean",              :Float, :Asc),
+    ("average_std",               :Float, :Asc),
+    ("average_avg",               :Float, :Asc),
+    ("average_median",            :Float, :Asc),
+    ("average_mode",              :Float, :Asc),
+    ("average_mode_count",        :Int,   :Desc),
+    ("average_consecutive",       :Int,   :Desc),
+    ("average_consecutive_start", :Float, :Asc),
+    ("average_consecutive_end",   :Float, :Asc),
+    ("gold",                      :Int,   :Desc),
+    ("silver",                    :Int,   :Desc),
+    ("bronze",                    :Int,   :Desc),
+    ("chances",                   :Int,   :Desc),
+    ("attempts",                  :Int,   :Desc),
+    ("solved_count",              :Int,   :Desc),
+    ("solved_nunique",            :Int,   :Desc),
+    ("solved_mean",               :Float, :Asc),
+    ("solved_std",                :Float, :Asc),
+    ("solved_avg",                :Float, :Asc),
+    ("solved_median",             :Float, :Asc),
+    ("solved_mode",               :Int,   :Asc),
+    ("solved_mode_count",         :Int,   :Desc),
+    ("solved_min",                :Int,   :Asc),
+    ("solved_max",                :Int,   :Asc),
+    ("solved_consecutive",        :Int,   :Desc),
+    ("solved_consecutive_start",  :Int,   :Asc),
+    ("solved_consecutive_end",    :Int,   :Asc),
+    ("solved_mo3_last",           :Float, :Asc),
+    ("solved_mo3_best",           :Float, :Asc),
+    ("solved_mo5_last",           :Float, :Asc),
+    ("solved_mo5_best",           :Float, :Asc),
+    ("solved_mo12_last",          :Float, :Asc),
+    ("solved_mo12_best",          :Float, :Asc),
+    ("solved_mo50_last",          :Float, :Asc),
+    ("solved_mo50_best",          :Float, :Asc),
+    ("solved_mo100_last",         :Float, :Asc),
+    ("solved_mo100_best",         :Float, :Asc),
+    ("solved_ao5_last",           :Float, :Asc),
+    ("solved_ao5_best",           :Float, :Asc),
+    ("solved_ao12_last",          :Float, :Asc),
+    ("solved_ao12_best",          :Float, :Asc),
+    ("solved_ao50_last",          :Float, :Asc),
+    ("solved_ao50_best",          :Float, :Asc),
+    ("solved_ao100_last",         :Float, :Asc),
+    ("solved_ao100_best",         :Float, :Asc),
+    ("avg_item_3rd_min",          :Int,   :Asc),
+    ("avg_item_3rd_max",          :Int,   :Asc),
+    ("avg_item_2nd_min",          :Int,   :Asc),
+    ("avg_item_2nd_max",          :Int,   :Asc),
+]
+
+const COL_IDX = Dict(name => i for (i, (name, kind, dir)) in enumerate(COLS))
+
+const DESC_ORDER = [
+    "competitions", "rounds", "chances", "attempts",
+    "solved_count", "solved_nunique", "solved_mode_count", "solved_consecutive",
+    "best_count", "best_nunique", "best_mode_count", "best_consecutive",
+    "average_attempts", "average_count", "average_nunique", "average_mode_count", "average_consecutive",
+    "gold", "silver", "bronze"
+]
+
+const RANK_COL_ORDER = let
+    order = Int[]
+    for (i, (_, _, dir)) in enumerate(COLS)
+        dir == :Asc && push!(order, i)
+    end
+    for name in DESC_ORDER
+        push!(order, COL_IDX[name])
+    end
+    order
+end
+
+struct ColIdx
+    competitions::Int
+    rounds::Int
+    best::Int
+    best_max::Int
+    best_count::Int
+    best_nunique::Int
+    best_mean::Int
+    best_std::Int
+    best_avg::Int
+    best_median::Int
+    best_mode::Int
+    best_mode_count::Int
+    best_consecutive::Int
+    best_consecutive_start::Int
+    best_consecutive_end::Int
+    average_attempts::Int
+    average::Int
+    average_max::Int
+    average_count::Int
+    average_nunique::Int
+    average_mean::Int
+    average_std::Int
+    average_avg::Int
+    average_median::Int
+    average_mode::Int
+    average_mode_count::Int
+    average_consecutive::Int
+    average_consecutive_start::Int
+    average_consecutive_end::Int
+    gold::Int
+    silver::Int
+    bronze::Int
+    chances::Int
+    attempts::Int
+    solved_count::Int
+    solved_nunique::Int
+    solved_mean::Int
+    solved_std::Int
+    solved_avg::Int
+    solved_median::Int
+    solved_mode::Int
+    solved_mode_count::Int
+    solved_min::Int
+    solved_max::Int
+    solved_consecutive::Int
+    solved_consecutive_start::Int
+    solved_consecutive_end::Int
+    solved_mo::Vector{Tuple{Int,Int,Int}}
+    solved_ao::Vector{Tuple{Int,Int,Int}}
+    avg_item_3rd_min::Int
+    avg_item_3rd_max::Int
+    avg_item_2nd_min::Int
+    avg_item_2nd_max::Int
+end
+
+function ColIdx()
+    ColIdx(
+        COL_IDX["competitions"],
+        COL_IDX["rounds"],
+        COL_IDX["best"],
+        COL_IDX["best_max"],
+        COL_IDX["best_count"],
+        COL_IDX["best_nunique"],
+        COL_IDX["best_mean"],
+        COL_IDX["best_std"],
+        COL_IDX["best_avg"],
+        COL_IDX["best_median"],
+        COL_IDX["best_mode"],
+        COL_IDX["best_mode_count"],
+        COL_IDX["best_consecutive"],
+        COL_IDX["best_consecutive_start"],
+        COL_IDX["best_consecutive_end"],
+        COL_IDX["average_attempts"],
+        COL_IDX["average"],
+        COL_IDX["average_max"],
+        COL_IDX["average_count"],
+        COL_IDX["average_nunique"],
+        COL_IDX["average_mean"],
+        COL_IDX["average_std"],
+        COL_IDX["average_avg"],
+        COL_IDX["average_median"],
+        COL_IDX["average_mode"],
+        COL_IDX["average_mode_count"],
+        COL_IDX["average_consecutive"],
+        COL_IDX["average_consecutive_start"],
+        COL_IDX["average_consecutive_end"],
+        COL_IDX["gold"],
+        COL_IDX["silver"],
+        COL_IDX["bronze"],
+        COL_IDX["chances"],
+        COL_IDX["attempts"],
+        COL_IDX["solved_count"],
+        COL_IDX["solved_nunique"],
+        COL_IDX["solved_mean"],
+        COL_IDX["solved_std"],
+        COL_IDX["solved_avg"],
+        COL_IDX["solved_median"],
+        COL_IDX["solved_mode"],
+        COL_IDX["solved_mode_count"],
+        COL_IDX["solved_min"],
+        COL_IDX["solved_max"],
+        COL_IDX["solved_consecutive"],
+        COL_IDX["solved_consecutive_start"],
+        COL_IDX["solved_consecutive_end"],
+        [(3,  COL_IDX["solved_mo3_last"],  COL_IDX["solved_mo3_best"]),
+         (5,  COL_IDX["solved_mo5_last"],  COL_IDX["solved_mo5_best"]),
+         (12, COL_IDX["solved_mo12_last"], COL_IDX["solved_mo12_best"]),
+         (50, COL_IDX["solved_mo50_last"], COL_IDX["solved_mo50_best"]),
+         (100,COL_IDX["solved_mo100_last"],COL_IDX["solved_mo100_best"])],
+        [(5,  COL_IDX["solved_ao5_last"],  COL_IDX["solved_ao5_best"]),
+         (12, COL_IDX["solved_ao12_last"], COL_IDX["solved_ao12_best"]),
+         (50, COL_IDX["solved_ao50_last"], COL_IDX["solved_ao50_best"]),
+         (100,COL_IDX["solved_ao100_last"],COL_IDX["solved_ao100_best"])],
+        COL_IDX["avg_item_3rd_min"],
+        COL_IDX["avg_item_3rd_max"],
+        COL_IDX["avg_item_2nd_min"],
+        COL_IDX["avg_item_2nd_max"],
     )
-    rdf = DataFrames.leftjoin(
-        rdf,
-        DataFrames.combine(
-            DataFrames.groupby(filter(:best => >(0), df), id_col),
-            :best => (x -> x |> extrema |> vcat) => [:best, :best_max],
-            DataFrames.nrow => :best_count,
-            :best => nunique => :best_nunique,
-            :best => DataFrames.mean => :best_mean,
-            :best => DataFrames.std => :best_std,
-            :best => avg => :best_avg,
-            :best => DataFrames.median => :best_median,
-            :best => mode_count => [:best_mode, :best_mode_count],
-            :best => Base.Fix2(calc_consecutive, [1]) => [:best_consecutive, :best_consecutive_start, :best_consecutive_end],
-        ),
-        on=id_col
-    )
-    rdf = DataFrames.leftjoin(
-        rdf,
-        DataFrames.combine(
-            DataFrames.groupby(filter(:average => !=(0), df), id_col),
-            DataFrames.nrow => :average_attempts,
-        ),
-        on=id_col
-    )
-    avg_df = filter(:average => >(0), df)
-    if DataFrames.nrow(avg_df) > 0
-        rdf = DataFrames.leftjoin(
-            rdf,
-            DataFrames.combine(
-                DataFrames.groupby(
-                    DataFrames.transform(
-                        avg_df,
-                        # DataFrames.AsTable([:value1, :value2, :value3]) => DataFrames.ByRow(x -> [maximum(x), DataFrames.median(x)]) => [:wrost_in_average, :median_in_average],
-                        :average => (x -> x / 100) => :average_real,
-                    ),
-                    id_col,
-                ),
-                :average_real => (x -> x |> extrema |> vcat) => [:average, :average_max],
-                DataFrames.nrow => :average_count,
-                :average => nunique => :average_nunique,
-                :average_real => DataFrames.mean => :average_mean,
-                :average_real => DataFrames.std => :average_std,
-                :average_real => avg => :average_avg,
-                :average_real => DataFrames.median => :average_median,
-                :average => (x -> [(x[1][1] / 100, x[1][2])]) ∘ mode_count => [:average_mode, :average_mode_count],
-                :average => (x -> [(x[1][1], x[1][2] / 100, x[1][3] / 100)]) ∘ Base.Fix2(calc_consecutive, [33, 34]) => [:average_consecutive, :average_consecutive_start, :average_consecutive_end],
-                # :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
-                # :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
-            ),
-            on=id_col
-        )
+end
+
+const CI = ColIdx()
+
+# ---------------------------------------------------------------------------
+# Cells, Rows, Frames, Scratch
+# ---------------------------------------------------------------------------
+
+const Cell = Union{Missing, Int64, Float64}
+
+mutable struct Row
+    person_key::UInt32
+    person_id::String
+    person_name::String
+    country_id::String
+    gender::String
+    vals::Vector{Cell}
+    ranks::Vector{Cell}
+    nrs::Vector{Cell}
+    year::Cell
+    category::Cell
+end
+
+struct Frame
+    rows::Vector{Row}
+    year_filter::Symbol
+    year::Int32
+end
+
+function empty_row(person_key::UInt32)
+    n = length(COLS)
+    Row(person_key, "", "", "", "",
+        fill(missing, n), fill(missing, n), fill(missing, n), missing, missing)
+end
+
+function row_for_person(frame::Frame, person_key::UInt32)::Union{Row,Nothing}
+    for r in frame.rows
+        r.person_key == person_key && return r
+    end
+    nothing
+end
+
+mutable struct Scratch
+    bests::Vector{Int64}
+    avgs_i::Vector{Int64}
+    avgs_real::Vector{Float64}
+    avgs_sorted::Vector{Float64}
+    uniq::Vector{Int64}
+    solved::Vector{Int64}
+    worsts::Vector{Int64}
+    medians::Vector{Int64}
+    att_vs::Vector{Int64}
+    comp_keys::Vector{UInt32}
+    tmp_i64::Vector{Int64}
+    tmp_f64::Vector{Float64}
+    single_values::Vector{Union{Missing,Int32}}
+    Scratch() = new(Int64[], Int64[], Float64[], Float64[], Int64[], Int64[], Int64[], Int64[], Int64[], UInt32[], Int64[], Float64[], Union{Missing,Int32}[])
+end
+
+function clear!(sc::Scratch)
+    empty!(sc.bests)
+    empty!(sc.avgs_i)
+    empty!(sc.avgs_real)
+    empty!(sc.avgs_sorted)
+    empty!(sc.uniq)
+    empty!(sc.solved)
+    empty!(sc.worsts)
+    empty!(sc.medians)
+    empty!(sc.att_vs)
+    empty!(sc.comp_keys)
+    empty!(sc.tmp_i64)
+    empty!(sc.tmp_f64)
+    empty!(sc.single_values)
+end
+
+# ---------------------------------------------------------------------------
+# Ranking
+# ---------------------------------------------------------------------------
+
+function nan_lt_asc(a::Float64, b::Float64)
+    isnan(b) ? !isnan(a) : (isnan(a) ? false : a < b)
+end
+
+function nan_lt_desc(a::Float64, b::Float64)
+    isnan(a) ? !isnan(b) : (isnan(b) ? false : a > b)
+end
+
+function competerank_col(rows::Vector{Row}, ci::Int, dir::Symbol, subset=nothing)
+    n = subset === nothing ? length(rows) : length(subset)
+    out = Vector{Cell}(missing, n)
+    present = Vector{Tuple{Int,Float64}}()
+    sizehint!(present, n)
+    get_row = subset === nothing ? (k -> rows[k]) : (k -> rows[subset[k]])
+    for k in 1:n
+        v = get_row(k).vals[ci]
+        v === missing && continue
+        f = v isa Int64 ? Float64(v) : v::Float64
+        push!(present, (k, f))
+    end
+    isempty(present) && return out
+    if dir == :Desc
+        sort!(present, lt=(x, y)->nan_lt_desc(x[2], y[2]))
     else
-        for col_name in [
-            :average, :average_max, :average_count, :average_nunique,
-            :average_mean, :average_std, :average_avg, :average_median,
-            :average_mode, :average_mode_count,
-            :average_consecutive, :average_consecutive_start, :average_consecutive_end,
-        ]
-            rdf[!, col_name] .= missing
+        sort!(present, lt=(x, y)->nan_lt_asc(x[2], y[2]))
+    end
+    rank = 1
+    prev = nothing
+    for (pos, (k, v)) in enumerate(present)
+        eq = prev !== nothing && prev == v
+        if !eq
+            rank = pos
+        end
+        out[k] = Int64(rank)
+        prev = v
+    end
+    out
+end
+
+function compute_ranks!(rows::Vector{Row})
+    for ci in 1:length(COLS)
+        dir = COLS[ci][3]
+        ranks = competerank_col(rows, ci, dir, nothing)
+        for i in 1:length(rows)
+            rows[i].ranks[ci] = ranks[i]
         end
     end
-
-    rdf = DataFrames.leftjoin(
-        rdf,
-        DataFrames.combine(
-            DataFrames.groupby(
-                filter(
-                    :best => >(0),
-                    filter(
-                        :roundTypeId => x -> x ∈ ["f", "c"],
-                        df
-                    )
-                ),
-                id_col
-            ),
-            :pos => (x -> [(count(==(1), x), count(==(2), x), count(==(3), x))]) => [:gold, :silver, :bronze]
-        ),
-        on=id_col
-    )
-
-    return rdf
-end
-
-function stats_round_non_best_result(single_df, id_col, val_col)
-    has_avg_df = filter(:average => >(0), single_df)
-    if DataFrames.nrow(has_avg_df) > 0
-        df = DataFrames.combine(
-            DataFrames.groupby(has_avg_df, :id),
-            val_col => maximum => :wrost_in_average,
-            val_col => (x -> Int(DataFrames.median(x))) => :median_in_average,
-            id_col => last => id_col
-        )
-        return DataFrames.combine(
-            DataFrames.groupby(df, id_col),
-            :wrost_in_average => (x -> x |> extrema |> vcat) => [:avg_item_3rd_min, :avg_item_3rd_max],
-            :median_in_average => (x -> x |> extrema |> vcat) => [:avg_item_2nd_min, :avg_item_2nd_max],
-        )
-    else
-        df = DataFrames.DataFrame(
-            avg_item_3rd_min=Float64[], avg_item_3rd_max=Float64[],
-            avg_item_2nd_min=Float64[], avg_item_2nd_max=Float64[],
-        )
-        df[!, id_col] .= missing
-        return df
+    by_country = Dict{String, Vector{Int}}()
+    for (i, r) in enumerate(rows)
+        if haskey(by_country, r.country_id)
+            push!(by_country[r.country_id], i)
+        else
+            by_country[r.country_id] = [i]
+        end
     end
-end
-
-function print_some_persons(df, person_ids)
-    df = filter(:personId => x -> x ∈ person_ids, df)
-    lens = collect(map(length, df[!, :personName]))
-    col_name_len = maximum(map(length, names(df)))
-    _t = nonmissingtype ∘ eltype
-    for name_col in zip(names(df), eachcol(df))
-        Printf.@printf "%*s" col_name_len name_col[1]
-        for len_et in zip(lens, name_col[2])
-            if _t(len_et[2]) == Float64
-                Printf.@printf "    %*.*f" (len_et[1]) 2 len_et[2]
-            else
-                Printf.@printf "    %*s" len_et[1] len_et[2]
+    for ci in 1:length(COLS)
+        dir = COLS[ci][3]
+        for idxs in values(by_country)
+            ranks = competerank_col(rows, ci, dir, idxs)
+            for j in 1:length(idxs)
+                rows[idxs[j]].nrs[ci] = ranks[j]
             end
         end
-        println("")
     end
 end
 
 
-function print_topk(df, col, k, country)
-    rank_col = Symbol("$col" * "_rank")
-    nr_col = Symbol("$col" * "_nr")
-    cols = [:personName, :countryId, col, nr_col, rank_col]
-    if country === missing
-        filter_col = rank_col
+# ---------------------------------------------------------------------------
+# Calculation
+# ---------------------------------------------------------------------------
+
+function compute_row!(row::Row, data::WcaData, person_key::UInt32, idxs::AbstractVector{Int}, sc::Scratch)
+    clear!(sc)
+    ci = CI
+
+    # --- round-level stats ---
+    for i in idxs
+        push!(sc.comp_keys, data.results[i].comp_key)
+    end
+    sort!(sc.comp_keys)
+    unique!(sc.comp_keys)
+    row.vals[ci.competitions] = Int64(length(sc.comp_keys))
+    row.vals[ci.rounds] = Int64(length(idxs))
+
+    # best stats on best > 0
+    for i in idxs
+        r = data.results[i]
+        r.best > 0 && push!(sc.bests, Int64(r.best))
+    end
+    if !isempty(sc.bests)
+        bests = sc.bests
+        mn, mx = extrema_i(bests)
+        row.vals[ci.best] = mn
+        row.vals[ci.best_max] = mx
+        row.vals[ci.best_count] = Int64(length(bests))
+        copy_to_scratch!(sc.uniq, bests)
+        sort!(sc.uniq)
+        unique!(sc.uniq)
+        row.vals[ci.best_nunique] = Int64(length(sc.uniq))
+        row.vals[ci.best_mean] = mean_i(bests)
+        row.vals[ci.best_std] = std_i(bests)
+        v = trim_avg_i(bests)
+        v !== nothing && (row.vals[ci.best_avg] = v)
+        row.vals[ci.best_median] = median_f_from_i!(copy_to_scratch!(sc.tmp_i64, bests))
+        mode, mc = mode_count_i!(copy_to_scratch!(sc.tmp_i64, bests))
+        row.vals[ci.best_mode] = mode
+        row.vals[ci.best_mode_count] = mc
+        cc, cs, ce = calc_consecutive!(copy_to_scratch!(sc.tmp_i64, bests), Int64[1])
+        row.vals[ci.best_consecutive] = cc
+        row.vals[ci.best_consecutive_start] = cs
+        row.vals[ci.best_consecutive_end] = ce
+    end
+
+    # average_attempts on average != 0
+    avg_attempts = count(i -> data.results[i].average != 0, idxs)
+    avg_attempts > 0 && (row.vals[ci.average_attempts] = Int64(avg_attempts))
+
+    # average stats on average > 0
+    for i in idxs
+        r = data.results[i]
+        r.average > 0 && push!(sc.avgs_i, Int64(r.average))
+    end
+    if !isempty(sc.avgs_i)
+        for v in sc.avgs_i
+            push!(sc.avgs_real, v / 100.0)
+        end
+        avgs_i = sc.avgs_i
+        avgs_real = sc.avgs_real
+        mn, mx = extrema_f(avgs_real)
+        row.vals[ci.average] = mn
+        row.vals[ci.average_max] = mx
+        row.vals[ci.average_count] = Int64(length(avgs_real))
+        copy_to_scratch!(sc.uniq, avgs_i)
+        sort!(sc.uniq)
+        unique!(sc.uniq)
+        row.vals[ci.average_nunique] = Int64(length(sc.uniq))
+        row.vals[ci.average_mean] = mean_f(avgs_real)
+        row.vals[ci.average_std] = std_f(avgs_real)
+        v = trim_avg_f!(copy_to_scratch!(sc.tmp_f64, avgs_real))
+        v !== nothing && (row.vals[ci.average_avg] = v)
+        copy_to_scratch!(sc.avgs_sorted, avgs_real)
+        sort!(sc.avgs_sorted)
+        n = length(sc.avgs_sorted)
+        med = isodd(n) ? sc.avgs_sorted[(n + 1) ÷ 2] : (sc.avgs_sorted[n ÷ 2] + sc.avgs_sorted[n ÷ 2 + 1]) / 2.0
+        row.vals[ci.average_median] = med
+        mode_i, mc = mode_count_i!(copy_to_scratch!(sc.tmp_i64, avgs_i))
+        row.vals[ci.average_mode] = mode_i / 100.0
+        row.vals[ci.average_mode_count] = mc
+        cc, cs, ce = calc_consecutive!(copy_to_scratch!(sc.tmp_i64, avgs_i), Int64[33, 34])
+        row.vals[ci.average_consecutive] = cc
+        row.vals[ci.average_consecutive_start] = cs / 100.0
+        row.vals[ci.average_consecutive_end] = ce / 100.0
+    end
+
+    # medals: final rounds (f or c) with best > 0
+    g, s, b = 0, 0, 0
+    any_final_best = false
+    for i in idxs
+        r = data.results[i]
+        if r.best > 0 && (r.round_type_id == UInt8('f') || r.round_type_id == UInt8('c'))
+            any_final_best = true
+            if r.pos == 1
+                g += 1
+            elseif r.pos == 2
+                s += 1
+            elseif r.pos == 3
+                b += 1
+            end
+        end
+    end
+    if any_final_best
+        row.vals[ci.gold] = Int64(g)
+        row.vals[ci.silver] = Int64(s)
+        row.vals[ci.bronze] = Int64(b)
+    end
+
+    # --- single attempts ---
+    for i in idxs
+        r = data.results[i]
+        atts = get(data.attempts_by_result, r.id, nothing)
+        if atts !== nothing && !isempty(atts)
+            for a in atts
+                push!(sc.single_values, a.value)
+            end
+        else
+            push!(sc.single_values, missing)
+        end
+    end
+
+    row.vals[ci.chances] = Int64(length(sc.single_values))
+    attempts_count = count(v -> v !== missing && v > -2, sc.single_values)
+    row.vals[ci.attempts] = Int64(attempts_count)
+
+    for v in sc.single_values
+        v !== missing && v > 0 && push!(sc.solved, Int64(v))
+    end
+
+    if !isempty(sc.solved)
+        solved = sc.solved
+        row.vals[ci.solved_count] = Int64(length(solved))
+        copy_to_scratch!(sc.uniq, solved)
+        sort!(sc.uniq)
+        unique!(sc.uniq)
+        row.vals[ci.solved_nunique] = Int64(length(sc.uniq))
+        row.vals[ci.solved_mean] = mean_i(solved)
+        row.vals[ci.solved_std] = std_i(solved)
+        v = trim_avg_i(solved)
+        v !== nothing && (row.vals[ci.solved_avg] = v)
+        row.vals[ci.solved_median] = median_f_from_i!(copy_to_scratch!(sc.tmp_i64, solved))
+        mode, mc = mode_count_i!(copy_to_scratch!(sc.tmp_i64, solved))
+        row.vals[ci.solved_mode] = mode
+        row.vals[ci.solved_mode_count] = mc
+        mn, mx = extrema_i(solved)
+        row.vals[ci.solved_min] = mn
+        row.vals[ci.solved_max] = mx
+        cc, cs, ce = calc_consecutive!(copy_to_scratch!(sc.tmp_i64, solved), Int64[1])
+        row.vals[ci.solved_consecutive] = cc
+        row.vals[ci.solved_consecutive_start] = cs
+        row.vals[ci.solved_consecutive_end] = ce
+        for (n, last_i, best_i) in ci.solved_mo
+            res = rolling_mean(solved, n)
+            if res !== nothing
+                row.vals[last_i] = res[1]
+                row.vals[best_i] = res[2]
+            end
+        end
+        for (n, last_i, best_i) in ci.solved_ao
+            res = rolling_trim_avg(solved, n)
+            if res !== nothing
+                row.vals[last_i] = res[1]
+                row.vals[best_i] = res[2]
+            end
+        end
+    end
+
+    # --- avg_item_3rd / 2nd ---
+    for i in idxs
+        r = data.results[i]
+        r.average <= 0 && continue
+        atts = get(data.attempts_by_result, r.id, nothing)
+        (atts === nothing || isempty(atts)) && continue
+        empty!(sc.att_vs)
+        for a in atts
+            push!(sc.att_vs, Int64(a.value))
+        end
+        push!(sc.worsts, maximum(sc.att_vs))
+        push!(sc.medians, median_i!(copy_to_scratch!(sc.tmp_i64, sc.att_vs)))
+    end
+    if !isempty(sc.worsts)
+        mn, mx = extrema_i(sc.worsts)
+        row.vals[ci.avg_item_3rd_min] = mn
+        row.vals[ci.avg_item_3rd_max] = mx
+        mn, mx = extrema_i(sc.medians)
+        row.vals[ci.avg_item_2nd_min] = mn
+        row.vals[ci.avg_item_2nd_max] = mx
+    end
+end
+
+function calc(data::WcaData, event_id::UInt16, year_filter::Symbol, year::Int32)
+    kept = Vector{Int}(undef, 0)
+    sizehint!(kept, length(data.results) ÷ 16)
+    for (i, r) in enumerate(data.results)
+        r.event_id != event_id && continue
+        y = data.competitions[r.comp_key].year
+        if year_filter == :eq
+            y == year || continue
+        else
+            y <= year || continue
+        end
+        push!(kept, i)
+    end
+
+    person_slices = Vector{Tuple{UInt32,Int,Int}}()
+    if !isempty(kept)
+        start = 1
+        cur_pk = data.results[kept[1]].person_key
+        for i in 2:length(kept)
+            pk = data.results[kept[i]].person_key
+            if pk != cur_pk
+                push!(person_slices, (cur_pk, start, i - 1))
+                start = i
+                cur_pk = pk
+            end
+        end
+        push!(person_slices, (cur_pk, start, length(kept)))
+    end
+
+    person_order = [pk for (pk, _, _) in person_slices]
+    sort!(person_order, by=pk -> begin
+        p = data.persons[pk]
+        haskey(data.person_idx_by_wca_id, p.wca_id) ? (0, p.wca_id) : (1, p.wca_id)
+    end)
+
+    pk_to_slice = Dict{UInt32, Tuple{Int,Int}}()
+    for (pk, s, e) in person_slices
+        pk_to_slice[pk] = (s, e)
+    end
+
+    n_cols = length(COLS)
+    rows = Vector{Row}()
+    sizehint!(rows, length(person_order))
+    scratch = Scratch()
+    for pk in person_order
+        p = data.persons[pk]
+        row = Row(pk, p.wca_id, p.name, p.country_id, p.gender,
+                  fill(missing, n_cols), fill(missing, n_cols), fill(missing, n_cols),
+                  missing, missing)
+        (s, e) = pk_to_slice[pk]
+        compute_row!(row, data, pk, @view(kept[s:e]), scratch)
+        push!(rows, row)
+    end
+
+    compute_ranks!(rows)
+    Frame(rows, year_filter, year)
+end
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+function write_cell(io, v::Cell)
+    if v === missing
+        # empty
+    elseif v isa Int64
+        print(io, v::Int64)
     else
-        filter_col = nr_col
-        df = filter(:countryId => ==(country), df)
+        f = v::Float64
+        if isnan(f)
+            write(io, "NaN")
+        elseif isinf(f)
+            write(io, f > 0 ? "Inf" : "-Inf")
+        else
+            print(io, f)
+        end
     end
-    df = sort(filter(filter_col => (x -> x !== missing && x <= k), df), [filter_col])[!, cols]
-    println(df)
 end
 
-
-function calc(wca_data, year_filter)
-    # Fallback path that prepares inputs on every call. Prefer the 4-arg
-    # method below from a per-run driver to avoid repeating this work.
-    event_all = prepare_event_results(wca_data, "333fm")
-    persons_sel = prepare_persons(wca_data)
-    return calc(wca_data, event_all, persons_sel, year_filter)
+function write_str_csv(io, s::String)
+    if occursin(',', s) || occursin('"', s) || occursin('\n', s)
+        write(io, '"')
+        for ch in s
+            if ch == '"'
+                write(io, "\"\"")
+            else
+                print(io, ch)
+            end
+        end
+        write(io, '"')
+    else
+        write(io, s)
+    end
 end
 
-function calc(wca_data, event_all, persons_sel, year_filter)
-    event_df = year_filter === missing ? event_all : filter(:year => year_filter, event_all)
-    fm_single_res_df = get_single_res_df(wca_data, event_df)
-    df = DataFrames.leftjoin(
-        stats_round_result(event_df, :personId),
-        stats_single_result(fm_single_res_df, :personId, :value),
-        on=:personId
-    )
-    df = DataFrames.leftjoin(
-        df,
-        stats_round_non_best_result(fm_single_res_df, :personId, :value),
-        on=:personId
-    )
-    all_cols = filter(!=("personId"), names(df))
-    df = DataFrames.rightjoin(
-        persons_sel,
-        df,
-        on=:personId
-    )
-    desc_cols = [
-        :competitions, :rounds, :chances, :attempts,
-        :solved_count, :solved_nunique, :solved_mode_count, :solved_consecutive,
-        :best_count, :best_nunique, :best_mode_count, :best_consecutive,
-        :average_attempts, :average_count, :average_nunique, :average_mode_count, :average_consecutive,
-        :gold, :silver, :bronze
-    ]
-    asc_cols = filter(x -> (x ∉ map(String, desc_cols)), all_cols)
-    DataFrames.transform!(
-        df,
-        map(x -> (x => StatsBase.competerank => Symbol("$x" * "_rank")), asc_cols),
-        map(x -> (x => (y -> StatsBase.competerank(y, rev=true)) => Symbol("$x" * "_rank")), desc_cols),
-    )
-    df = DataFrames.transform!(
-        DataFrames.groupby(df, :countryId),
-        map(x -> (x => StatsBase.competerank => Symbol("$x" * "_nr")), asc_cols),
-        map(x -> (x => (y -> StatsBase.competerank(y, rev=true)) => Symbol("$x" * "_nr")), desc_cols),
-    )
-    return df
+function write_csv(path::String, frame::Frame)
+    open(path, "w") do io
+        write(io, "personId,personName,countryId,gender")
+        for (name, _, _) in COLS
+            write(io, ',', name)
+        end
+        for i in RANK_COL_ORDER
+            write(io, ',', COLS[i][1], "_rank")
+        end
+        for i in RANK_COL_ORDER
+            write(io, ',', COLS[i][1], "_nr")
+        end
+        write(io, '\n')
+        for row in frame.rows
+            write_str_csv(io, row.person_id)
+            write(io, ',')
+            write_str_csv(io, row.person_name)
+            write(io, ',')
+            write_str_csv(io, row.country_id)
+            write(io, ',')
+            write_str_csv(io, row.gender)
+            for v in row.vals
+                write(io, ',')
+                write_cell(io, v)
+            end
+            for i in RANK_COL_ORDER
+                write(io, ',')
+                write_cell(io, row.ranks[i])
+            end
+            for i in RANK_COL_ORDER
+                write(io, ',')
+                write_cell(io, row.nrs[i])
+            end
+            write(io, '\n')
+        end
+    end
 end
+
+function write_summary_csv(path::String, header::Vector{String}, rows::Vector{Row})
+    open(path, "w") do io
+        for (i, h) in enumerate(header)
+            i > 1 && write(io, ',')
+            write(io, h)
+        end
+        write(io, '\n')
+        for row in rows
+            write_str_csv(io, row.person_id)
+            write(io, ',')
+            write_str_csv(io, row.person_name)
+            write(io, ',')
+            write_str_csv(io, row.country_id)
+            write(io, ',')
+            write_str_csv(io, row.gender)
+            for v in row.vals
+                write(io, ',')
+                write_cell(io, v)
+            end
+            for i in RANK_COL_ORDER
+                write(io, ',')
+                write_cell(io, row.ranks[i])
+            end
+            for i in RANK_COL_ORDER
+                write(io, ',')
+                write_cell(io, row.nrs[i])
+            end
+            write(io, ',')
+            row.year === missing || print(io, row.year::Int64)
+            write(io, ',')
+            row.category === missing || write_str_csv(io, row.category::String)
+            write(io, '\n')
+        end
+    end
+end
+
+function print_some_persons(frame::Frame, person_ids::Vector{String})
+    id_set = Set(person_ids)
+    rows = Row[r for r in frame.rows if r.person_id in id_set]
+    isempty(rows) && return
+    name_lens = [max(length(r.person_name), 1) for r in rows]
+    col_names = String["personId", "personName", "countryId", "gender"]
+    for (name, _, _) in COLS
+        push!(col_names, name)
+    end
+    for i in RANK_COL_ORDER
+        push!(col_names, COLS[i][1] * "_rank")
+    end
+    for i in RANK_COL_ORDER
+        push!(col_names, COLS[i][1] * "_nr")
+    end
+    col_name_len = maximum(length.(col_names))
+
+    for (label, getter) in [("personId", r->r.person_id), ("personName", r->r.person_name),
+                            ("countryId", r->r.country_id), ("gender", r->r.gender)]
+        Printf.@printf "%*s" col_name_len label
+        for (i, r) in enumerate(rows)
+            Printf.@printf "    %*s" name_lens[i] getter(r)
+        end
+        println()
+    end
+
+    function print_numeric_row(name, cells)
+        Printf.@printf "%*s" col_name_len name
+        for (i, cell) in enumerate(cells)
+            if cell === missing
+                Printf.@printf "    %*s" name_lens[i] ""
+            elseif cell isa Int64
+                Printf.@printf "    %*d" name_lens[i] cell
+            else
+                Printf.@printf "    %*.*f" name_lens[i] 2 cell
+            end
+        end
+        println()
+    end
+
+    for (i, (name, _, _)) in enumerate(COLS)
+        print_numeric_row(name, [r.vals[i] for r in rows])
+    end
+    for i in RANK_COL_ORDER
+        print_numeric_row(WCAStats.COLS[i][1] * "_rank", [r.ranks[i] for r in rows])
+    end
+    for i in RANK_COL_ORDER
+        print_numeric_row(WCAStats.COLS[i][1] * "_nr", [r.nrs[i] for r in rows])
+    end
+end
+
+function print_topk(frame::Frame, col::String, k::Int, country::Union{String,Nothing})
+    ci = COL_IDX[col]
+    use_nr = country !== nothing
+    filtered = use_nr ? Row[r for r in frame.rows if r.country_id == country] : frame.rows
+    withrank = Tuple{Int64,Row}[]
+    for r in filtered
+        cell = use_nr ? r.nrs[ci] : r.ranks[ci]
+        cell === missing && continue
+        v = cell::Int64
+        v <= k && push!(withrank, (v, r))
+    end
+    sort!(withrank, by=x->x[1])
+    nr_name = col * "_nr"
+    rank_name = col * "_rank"
+    Printf.@printf "%20s %20s %20s %10s %10s\n" "personName" "countryId" col nr_name rank_name
+    for (_, r) in withrank
+        vstr = if r.vals[ci] === missing
+            ""
+        elseif r.vals[ci] isa Int64
+            string(r.vals[ci]::Int64)
+        else
+            string(r.vals[ci]::Float64)
+        end
+        nrs = r.nrs[ci] === missing ? "" : string(r.nrs[ci]::Int64)
+        rks = r.ranks[ci] === missing ? "" : string(r.ranks[ci]::Int64)
+        Printf.@printf "%20s %20s %20s %10s %10s\n" r.person_name r.country_id vstr nrs rks
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Summary helpers
+# ---------------------------------------------------------------------------
+
+function cell_sub(a::Cell, b::Cell, kind::Symbol)::Cell
+    a === missing || b === missing ? missing : begin
+        x = a isa Int64 ? Float64(a) : a::Float64
+        y = b isa Int64 ? Float64(b) : b::Float64
+        d = x - y
+        kind == :Int ? trunc(Int64, d) : d
+    end
+end
+
+function row_delta(row::Row, other::Row)::Row
+    n = length(COLS)
+    new_vals = Vector{Cell}(undef, n)
+    new_ranks = Vector{Cell}(undef, n)
+    new_nrs = Vector{Cell}(undef, n)
+    for i in 1:n
+        kind = COLS[i][2]
+        new_vals[i] = cell_sub(row.vals[i], other.vals[i], kind)
+        new_ranks[i] = cell_sub(row.ranks[i], other.ranks[i], :Int)
+        new_nrs[i] = cell_sub(row.nrs[i], other.nrs[i], :Int)
+    end
+    cat = if row.category === missing
+        missing
+    else
+        c = row.category::String
+        if endswith(c, "-year")
+            c[1:end-5] * "-year-detla"
+        else
+            c * "-detla"
+        end
+    end
+    Row(row.person_key, row.person_id, row.person_name, row.country_id, row.gender,
+        new_vals, new_ranks, new_nrs, row.year, cat)
+end
+
+function header_for_summary()::Vector{String}
+    h = String["personId", "personName", "countryId", "gender"]
+    for (name, _, _) in COLS
+        push!(h, name)
+    end
+    for i in RANK_COL_ORDER
+        push!(h, COLS[i][1] * "_rank")
+    end
+    for i in RANK_COL_ORDER
+        push!(h, COLS[i][1] * "_nr")
+    end
+    push!(h, "year")
+    push!(h, "category")
+    h
+end
+
+# ---------------------------------------------------------------------------
+# CLI and main driver
+# ---------------------------------------------------------------------------
 
 function process_data(parsed_args)
-    wca_data = load_wca(parsed_args["source"])
-    if wca_data === missing
-        println("cannot load data")
-        return
-    end
+    src = parsed_args["source"]
+    wca_data = load_wca(src)
+    wca_data === nothing && (println("cannot load data"); return)
     println("Load Data done")
-    event_all = prepare_event_results(wca_data, "333fm")
-    persons_sel = prepare_persons(wca_data)
-    result_dir = "results/"
-    if !isdir(result_dir)
-        mkdir(result_dir)
-    end
+
+    result_dir = "results"
+    isdir(result_dir) || mkdir(result_dir)
+
+    ev_id = event_id(wca_data, "333fm")
+    ev_id === nothing && (println("333fm event missing"); return)
+
     is_summary = parsed_args["%COMMAND%"] === "summary"
-    if is_summary
-        person_id = parsed_args["summary"]["id"]
-        years = sort(get_person_event_years(wca_data, person_id, "333fm"))
-        person_filter = :personId => ==(person_id)
-        dfs = []
-        last_dfs = Dict()
+    summary_person_id = if is_summary
+        pid = person_key(wca_data, parsed_args["summary"]["id"])
+        pid === nothing && (println("unknown person id"); return)
+        pid
     else
-        years = sort(get_event_years(wca_data, "333fm"))
-        if isa(parsed_args["year"], Int)
-            years = filter(==(parsed_args["year"]), years)
-        end
+        nothing
     end
-    for yi in eachindex(years)
-        year = years[yi]
+
+    years = if is_summary
+        person_event_years(wca_data, summary_person_id, ev_id)
+    else
+        event_years(wca_data, ev_id)
+    end
+    sort!(years)
+    y = parsed_args["year"]
+    if y !== nothing && !is_summary
+        filter!(==(Int32(y)), years)
+    end
+
+    summary_rows = Row[]
+    last_rows = Dict{String, Row}()
+    summary_header = nothing
+
+    n_years = length(years)
+    for (yi, year) in enumerate(years)
         println("dealing ", year, " ...")
-        for cat_config in zip(["in", "to"], [==(year), <=(year)])
-            category = cat_config[1]
-            cat_filter = cat_config[2]
+        for (category, filter_sym) in [("in", :eq), ("to", :le)]
+            df = calc(wca_data, ev_id, filter_sym, year)
             filename = joinpath(result_dir, "results.$(category)$(year).csv")
-            df = calc(wca_data, event_all, persons_sel, cat_filter)
-            CSV.write(filename, df)
+            write_csv(filename, df)
             println("saved: ", filename)
+
             if is_summary
-                person_df = filter(person_filter, df)
-                if DataFrames.nrow(person_df) == 0
-                    person_df = DataFrames.leftjoin(
-                        DataFrames.DataFrame(personId=[person_id]),
-                        person_df,
-                        on=:personId
-                    )
+                pid = summary_person_id
+                row = row_for_person(df, pid)
+                if row === nothing
+                    row = empty_row(pid)
+                    p = wca_data.persons[pid]
+                    row.person_id = p.wca_id
+                    row.person_name = p.name
+                    row.country_id = p.country_id
+                    row.gender = p.gender
                 end
-                person_df[!, :year] .= year
-                person_df[!, :category] .= "$(category)-year"
-                push!(dfs, person_df)
-                if haskey(last_dfs, category)
-                    last_df = last_dfs[category]
-                    column_selector = DataFrames.Not(:personId, :personName, :countryId, :gender, :year, :category)
-                    delta_df = DataFrames.DataFrame([
-                        col => person_df[:, col] - last_df[:, col]
-                        for col in map(Symbol, names(person_df[:, column_selector]))
-                    ])
-                    for col in [:personId, :personName, :countryId, :gender]
-                        delta_df[!, col] = person_df[:, col]
-                    end
-                    delta_df[!, :year] .= year
-                    delta_df[!, :category] .= "$(category)-year-detla"
-                    push!(dfs, delta_df)
+                row.year = Int64(year)
+                row.category = "$(category)-year"
+                summary_header === nothing && (summary_header = header_for_summary())
+                push!(summary_rows, deepcopy(row))
+                if haskey(last_rows, category)
+                    delta = row_delta(row, last_rows[category])
+                    delta.year = Int64(year)
+                    delta.category = "$(category)-year-detla"
+                    push!(summary_rows, delta)
                 end
-                last_dfs[category] = person_df
+                last_rows[category] = row
             end
-            if !checkbounds(Bool, years, nextind(years, yi)) && category == "to"  # least year.
-                if parsed_args["%COMMAND%"] === "topk"
-                    print_topk(df, Symbol(parsed_args["topk"]["col"]), parsed_args["topk"]["k"], parsed_args["topk"]["country"])
-                elseif parsed_args["%COMMAND%"] == "person"
+
+            is_last_year = yi == n_years
+            if is_last_year && category == "to"
+                cmd = parsed_args["%COMMAND%"]
+                if cmd === "topk"
+                    print_topk(df, parsed_args["topk"]["col"], parsed_args["topk"]["k"],
+                               parsed_args["topk"]["country"])
+                elseif cmd === "person"
                     print_some_persons(df, parsed_args["person"]["ids"])
-                else # these filter is too slow...
-                    # top100_filename = joinpath(result_dir, "results.top100.$(year).csv")
-                    # top100_df = filter(DataAPI.Cols(x -> endswith(x, "_rank")) => (v...) -> any(vv -> isless(vv, 100), v), df)
-                    # CSV.write(top100_filename, top100_df)
-                    # china_top30_filename = joinpath(result_dir, "results.china.top30.$(year).csv")
-                    # china_top30_df = filter(DataAPI.Cols(x -> endswith(x, "_nr")) => (v...) -> any(vv -> isless(vv, 30), v), filter(:countryId => ==("China"), df))
-                    # CSV.write(china_top30_filename, china_top30_df)
                 end
             end
         end
     end
+
     if is_summary
-        df = reduce(vcat, dfs)
-        for col in [:personName, :countryId, :gender]
-            df[:, col] .= dfs[1][1, col]
-        end
-        CSV.write(joinpath(result_dir, "$(person_id).csv"), df)
+        pid_str = parsed_args["summary"]["id"]
+        path = joinpath(result_dir, "$(pid_str).csv")
+        write_summary_csv(path, summary_header, summary_rows)
     end
 end
-
 
 function __init__()
     s = ArgParse.ArgParseSettings(commands_are_required=false)
@@ -504,57 +1568,25 @@ function __init__()
         help = "only stats special year"
         arg_type = Int
     end
-
     ArgParse.@add_arg_table! s["person"] begin
         "ids"
         nargs = '*'
         action = "store_arg"
     end
-
     ArgParse.@add_arg_table! s["topk"] begin
         "col"
         "--k"
         default = 10
         arg_type = Int
         "--country"
-        default = missing
+        default = nothing
     end
-
     ArgParse.@add_arg_table! s["summary"] begin
         "id"
         required = true
     end
-
-    ArgParse.@add_arg_table! s begin
-        "--profile"
-        help = "enable profiling"
-        action = :store_true
-        "--profile-out"
-        help = "profile output file"
-        default = "profile.txt"
-        "--pprof"
-        help = "enable pprof"
-        action = :store_true
-    end
     parsed_args = ArgParse.parse_args(s)
-
-    if parsed_args["profile"]
-        Profile.clear()
-        Profile.init(n=10^7, delay=0.01)
-        Profile.@profile process_data(parsed_args)
-
-        println("\n=== Profile Results ===")
-        Profile.print(format=:flat, sortedby=:count, C=true)
-        open(parsed_args["profile-out"], "w") do io
-            Profile.print(io, format=:flat, sortedby=:count, C=true)
-        end
-        println("\nProfile data saved to: $(parsed_args["profile-out"])")
-        if parsed_args["pprof"]
-            PProf.pprof()
-        end
-    else
-        process_data(parsed_args)
-    end
+    process_data(parsed_args)
 end
 
 end # module WCAStats
