@@ -127,3 +127,52 @@ which is called once per `(year, filter)` × person. Likely contributors:
 None of these are required for correctness — all 48 output CSVs are
 byte-identical across the two ports — but they directly target the 31.7 %
 DRAM-bound slot budget that currently separates Rust from C++.
+
+---
+
+## Follow-up — calc-path micro-optimisations (Rust, post-analysis)
+
+Acting on items (1) and a partial (2) from the list above, two calc-only
+changes landed without touching the loader:
+
+* **Precomputed column indices** replace the linear scan in `set(row, name,
+  cell)` — the 69-entry `COLS` slice was otherwise scanned ~500 k × 48 × ~70
+  times. `ColIdx` stores a `usize` for every referenced column plus two small
+  `[(n, last_idx, best_idx); …]` arrays that remove the `format!` allocations
+  from the rolling-mean hot loops.
+* **`Scratch` struct reuses per-person Vec buffers** (`bests`, `avgs_i`,
+  `avgs_real`, `avgs_sorted`, `uniq`, `solved`, `worsts`, `medians`,
+  `att_vs`, `single_values`). Capacity is retained across the ~500 k × 48
+  person × event-filter calls instead of re-allocating each time. As part of
+  this refactor `SingleRow` collapses to a plain `Vec<Option<i32>>`; the
+  other struct fields were never read.
+
+Before → after (best-of-5, full export, same machine):
+
+| Metric                 | Before (4341538) | After   | Delta  |
+|------------------------|------------------|---------|--------|
+| Wall time              | 11.24 s          | 10.60 s | −0.64 s |
+| Instructions retired   | 57.8 G           | 55.5 G  | −2.3 G |
+| Cycles                 | 33.6 G           | 33.6 G  | ≈0     |
+| IPC                    | 1.72             | 1.65    | −0.07  |
+| L1 d-cache miss rate   | 3.78 %           | 4.02 %  | +0.24  |
+| **TopDown L1 bound**   | **7.0 %**        | **4.0 %** | **−3.0** |
+| TopDown DRAM bound     | 31.7 %           | 33.5 %  | +1.8   |
+| TopDown backend bound  | 46.6 %           | 43.9 %  | −2.7   |
+
+Interpretation: the wins came from **doing less work**, not from becoming
+less memory-bound. Instructions retired dropped by 2.3 G (the eliminated
+linear scans + `format!` + per-person Vec allocations) and the L1-bound slot
+share fell 3 points (fewer small re-allocations hitting hot cache lines).
+DRAM-bound % actually nudged up because the same ~235 M LLC misses are now
+spread over fewer cycles — the working-set footprint is unchanged.
+
+To cut the remaining ~2.7 s gap vs the C++ port, the next steps would need
+to target that working-set itself: pack `Result333` / `Attempt` more tightly
+(remove padding, split cold string fields off the hot path), or recompute
+columnar summaries once per event filter rather than per person. Both are
+structural changes and were deferred because earlier attempts to restructure
+the loader regressed load time by 1–3 s.
+
+The output remains byte-identical to the committed `results-rust/` goldens
+(0/48 diffs via `cmp -s`).

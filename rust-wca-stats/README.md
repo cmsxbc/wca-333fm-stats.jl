@@ -83,10 +83,10 @@ Full-export run on the same machine (input ≈ 353 MB zipped, 48 output CSVs):
 
 | Command | Julia | Rust | Speed-up |
 | --- | --- | --- | --- |
-| `default` (all years) | 128.4 s | 11.0 s | **~11.7×** |
+| `default` (all years) | 128.4 s | 10.6 s | **~12.1×** |
 | `summary <id>` | ~148 s | ~20 s | ~7.4× |
 
-The Rust port now runs the full export in ~10.9 s; the C++23 port is faster
+The Rust port now runs the full export in ~10.6 s; the C++23 port is faster
 still at ~7.9 s thanks to `libdeflate` and more cache-friendly allocation
 patterns (see [`cpp-wca-stats/README.md`](../cpp-wca-stats/README.md)).
 
@@ -95,3 +95,33 @@ and parses it with a hand-rolled `memchr`-based splitter and a custom
 `FromDecimal` integer parser (no UTF-8 validation on the numeric hot path).
 Load time dropped from ≈ 9.8 s (with `csv` + `BufReader`) to ≈ 6.9 s. Per-year
 compute + CSV write is 0.01–0.2 s each.
+
+### Calc-path micro-optimisations
+
+Guided by the TopDown L3 profile in [`PERF_ANALYSIS.md`](../PERF_ANALYSIS.md)
+(Rust was ~32 % DRAM-bound in the per-person compute), two calc-only changes
+trimmed wall time from **11.24 s → 10.60 s** (best-of-5) without touching the
+loader or changing any output byte:
+
+* **Precomputed column indices** (`ColIdx`): the old `set(row, "name", …)`
+  helper did a linear scan of the 69-entry `COLS` slice for every write. That
+  scan ran ~500 k × 48 × ~70 times and dominated L1-bound stalls. `ColIdx`
+  resolves every column name once and `compute_row` now writes
+  `row.vals[ci.field]` directly. The rolling-mean column lookups
+  (`solved_mo{n}_last`/`_best`, `solved_ao{n}_last`/`_best`) that previously
+  built strings via `format!` in a hot loop are now indexed from small
+  `[(n, last_idx, best_idx); …]` arrays on `ColIdx`.
+* **Scratch-buffer reuse**: the per-person Vec allocations (`bests`, `avgs_i`,
+  `avgs_real`, `avgs_sorted`, `uniq`, `solved`, `worsts`, `medians`,
+  `att_vs`, `single_values`) were re-allocated roughly 500 k × 48 times. They
+  are now fields on a `Scratch` struct owned by `calc()`, `clear()`-ed before
+  each person so the capacity is retained. As part of this change the
+  `SingleRow` struct shrank to a plain `Vec<Option<i32>>` — only the attempt
+  `value` field was ever read downstream, so the other fields were dead code.
+
+Net effect on the TopDown profile: L1-bound dropped from ~7 % → 4 %, total
+instructions retired fell from 57.8 G → 55.5 G, and wall time dropped 0.6 s.
+DRAM-bound % is unchanged (the working-set footprint is the same), so the
+remaining ~2.7 s gap vs C++ is still dominated by DRAM latency — further
+wins would need either a tighter layout for `Result333`/`Attempt` or a
+columnar recomputation that streams over attempts once per event filter.

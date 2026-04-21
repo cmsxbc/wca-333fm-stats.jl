@@ -126,6 +126,138 @@ pub fn col_idx(name: &str) -> usize {
     })
 }
 
+// Precomputed column indices, resolved once instead of linearly scanning
+// `COLS` on every `set()` call in the hot path of `compute_row`.
+struct ColIdx {
+    competitions: usize,
+    rounds: usize,
+    best: usize,
+    best_max: usize,
+    best_count: usize,
+    best_nunique: usize,
+    best_mean: usize,
+    best_std: usize,
+    best_avg: usize,
+    best_median: usize,
+    best_mode: usize,
+    best_mode_count: usize,
+    best_consecutive: usize,
+    best_consecutive_start: usize,
+    best_consecutive_end: usize,
+    average_attempts: usize,
+    average: usize,
+    average_max: usize,
+    average_count: usize,
+    average_nunique: usize,
+    average_mean: usize,
+    average_std: usize,
+    average_avg: usize,
+    average_median: usize,
+    average_mode: usize,
+    average_mode_count: usize,
+    average_consecutive: usize,
+    average_consecutive_start: usize,
+    average_consecutive_end: usize,
+    gold: usize,
+    silver: usize,
+    bronze: usize,
+    chances: usize,
+    attempts: usize,
+    solved_count: usize,
+    solved_nunique: usize,
+    solved_mean: usize,
+    solved_std: usize,
+    solved_avg: usize,
+    solved_median: usize,
+    solved_mode: usize,
+    solved_mode_count: usize,
+    solved_min: usize,
+    solved_max: usize,
+    solved_consecutive: usize,
+    solved_consecutive_start: usize,
+    solved_consecutive_end: usize,
+    solved_mo: [(usize, usize, usize); 5],
+    solved_ao: [(usize, usize, usize); 4],
+    avg_item_3rd_min: usize,
+    avg_item_3rd_max: usize,
+    avg_item_2nd_min: usize,
+    avg_item_2nd_max: usize,
+}
+
+impl ColIdx {
+    fn new() -> Self {
+        ColIdx {
+            competitions: col_idx("competitions"),
+            rounds: col_idx("rounds"),
+            best: col_idx("best"),
+            best_max: col_idx("best_max"),
+            best_count: col_idx("best_count"),
+            best_nunique: col_idx("best_nunique"),
+            best_mean: col_idx("best_mean"),
+            best_std: col_idx("best_std"),
+            best_avg: col_idx("best_avg"),
+            best_median: col_idx("best_median"),
+            best_mode: col_idx("best_mode"),
+            best_mode_count: col_idx("best_mode_count"),
+            best_consecutive: col_idx("best_consecutive"),
+            best_consecutive_start: col_idx("best_consecutive_start"),
+            best_consecutive_end: col_idx("best_consecutive_end"),
+            average_attempts: col_idx("average_attempts"),
+            average: col_idx("average"),
+            average_max: col_idx("average_max"),
+            average_count: col_idx("average_count"),
+            average_nunique: col_idx("average_nunique"),
+            average_mean: col_idx("average_mean"),
+            average_std: col_idx("average_std"),
+            average_avg: col_idx("average_avg"),
+            average_median: col_idx("average_median"),
+            average_mode: col_idx("average_mode"),
+            average_mode_count: col_idx("average_mode_count"),
+            average_consecutive: col_idx("average_consecutive"),
+            average_consecutive_start: col_idx("average_consecutive_start"),
+            average_consecutive_end: col_idx("average_consecutive_end"),
+            gold: col_idx("gold"),
+            silver: col_idx("silver"),
+            bronze: col_idx("bronze"),
+            chances: col_idx("chances"),
+            attempts: col_idx("attempts"),
+            solved_count: col_idx("solved_count"),
+            solved_nunique: col_idx("solved_nunique"),
+            solved_mean: col_idx("solved_mean"),
+            solved_std: col_idx("solved_std"),
+            solved_avg: col_idx("solved_avg"),
+            solved_median: col_idx("solved_median"),
+            solved_mode: col_idx("solved_mode"),
+            solved_mode_count: col_idx("solved_mode_count"),
+            solved_min: col_idx("solved_min"),
+            solved_max: col_idx("solved_max"),
+            solved_consecutive: col_idx("solved_consecutive"),
+            solved_consecutive_start: col_idx("solved_consecutive_start"),
+            solved_consecutive_end: col_idx("solved_consecutive_end"),
+            solved_mo: [
+                (3,   col_idx("solved_mo3_last"),   col_idx("solved_mo3_best")),
+                (5,   col_idx("solved_mo5_last"),   col_idx("solved_mo5_best")),
+                (12,  col_idx("solved_mo12_last"),  col_idx("solved_mo12_best")),
+                (50,  col_idx("solved_mo50_last"),  col_idx("solved_mo50_best")),
+                (100, col_idx("solved_mo100_last"), col_idx("solved_mo100_best")),
+            ],
+            solved_ao: [
+                (5,   col_idx("solved_ao5_last"),   col_idx("solved_ao5_best")),
+                (12,  col_idx("solved_ao12_last"),  col_idx("solved_ao12_best")),
+                (50,  col_idx("solved_ao50_last"),  col_idx("solved_ao50_best")),
+                (100, col_idx("solved_ao100_last"), col_idx("solved_ao100_best")),
+            ],
+            avg_item_3rd_min: col_idx("avg_item_3rd_min"),
+            avg_item_3rd_max: col_idx("avg_item_3rd_max"),
+            avg_item_2nd_min: col_idx("avg_item_2nd_min"),
+            avg_item_2nd_max: col_idx("avg_item_2nd_max"),
+        }
+    }
+}
+
+static COL_IDX: std::sync::OnceLock<ColIdx> = std::sync::OnceLock::new();
+fn ci() -> &'static ColIdx { COL_IDX.get_or_init(ColIdx::new) }
+
 // Order in which Julia emits rank/nr columns: all asc cols (in COLS order),
 // then desc cols (in the literal order specified in Julia's `desc_cols`).
 pub const DESC_ORDER: &[&str] = &[
@@ -271,6 +403,40 @@ impl Frame {
     }
 }
 
+// Scratch buffers reused across compute_row calls within a single calc().
+// Keeping capacity between persons avoids ~10 small Vec allocations per
+// person and saves ~1–2s over a full run.
+#[derive(Default)]
+struct Scratch {
+    bests: Vec<i64>,
+    avgs_i: Vec<i64>,
+    avgs_real: Vec<f64>,
+    avgs_sorted: Vec<f64>,
+    uniq: Vec<i64>,
+    solved: Vec<i64>,
+    worsts: Vec<i64>,
+    medians: Vec<i64>,
+    att_vs: Vec<i64>,
+    // Only the attempt `value` field (or None for missing-attempt result rows)
+    // is actually read downstream, so we can skip the richer SingleRow struct.
+    single_values: Vec<Option<i32>>,
+}
+
+impl Scratch {
+    fn clear_all(&mut self) {
+        self.bests.clear();
+        self.avgs_i.clear();
+        self.avgs_real.clear();
+        self.avgs_sorted.clear();
+        self.uniq.clear();
+        self.solved.clear();
+        self.worsts.clear();
+        self.medians.clear();
+        self.att_vs.clear();
+        self.single_values.clear();
+    }
+}
+
 pub fn calc(data: &WcaData, event_id: u16, yf: YearFilter) -> Frame {
     // Step 1: filter results to event and year.
     let mut kept: Vec<usize> = Vec::new(); // indices into data.results
@@ -299,6 +465,7 @@ pub fn calc(data: &WcaData, event_id: u16, yf: YearFilter) -> Frame {
     });
 
     let mut rows: Vec<Row> = Vec::with_capacity(person_order.len());
+    let mut scratch = Scratch::default();
     for pk in person_order {
         let p = &data.persons[pk as usize];
         let mut row = Row::new(
@@ -308,7 +475,7 @@ pub fn calc(data: &WcaData, event_id: u16, yf: YearFilter) -> Frame {
             p.country_id.clone(),
             p.gender.clone(),
         );
-        compute_row(&mut row, data, pk, &by_person[&pk]);
+        compute_row(&mut row, data, pk, &by_person[&pk], &mut scratch);
         rows.push(row);
     }
 
@@ -318,10 +485,9 @@ pub fn calc(data: &WcaData, event_id: u16, yf: YearFilter) -> Frame {
     Frame { rows, year_filter: yf }
 }
 
-fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize]) {
-    let set = |row: &mut Row, name: &str, c: Cell| {
-        row.vals[col_idx(name)] = c;
-    };
+fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize], sc: &mut Scratch) {
+    let ci = ci();
+    sc.clear_all();
 
     // --- Round-level stats ---
     let rs: Vec<&crate::loader::Result333> = idxs.iter().map(|&i| &data.results[i]).collect();
@@ -329,199 +495,175 @@ fn compute_row(row: &mut Row, data: &WcaData, _person_key: u32, idxs: &[usize]) 
     // competitions (unique comp_keys)
     let mut comp_set: AHashSet<u32> = AHashSet::new();
     for r in &rs { comp_set.insert(r.comp_key); }
-    set(row, "competitions", Cell::Int(comp_set.len() as i64));
-    set(row, "rounds", Cell::Int(rs.len() as i64));
+    row.vals[ci.competitions] = Cell::Int(comp_set.len() as i64);
+    row.vals[ci.rounds] = Cell::Int(rs.len() as i64);
 
     // best stats on best > 0
-    let bests: Vec<i64> = rs.iter().filter(|r| r.best > 0).map(|r| r.best as i64).collect();
-    if !bests.is_empty() {
-        let (mn, mx) = extrema(&bests);
-        set(row, "best", Cell::Int(mn));
-        set(row, "best_max", Cell::Int(mx));
-        set(row, "best_count", Cell::Int(bests.len() as i64));
-        let mut uniq = bests.clone(); uniq.sort(); uniq.dedup();
-        set(row, "best_nunique", Cell::Int(uniq.len() as i64));
-        set(row, "best_mean", Cell::Float(stats::mean_i(&bests)));
-        set(row, "best_std", Cell::Float(stats::std_i(&bests)));
-        match stats::trim_avg_i(&bests) {
-            Some(v) => set(row, "best_avg", Cell::Float(v)),
-            None => {}
+    for r in &rs { if r.best > 0 { sc.bests.push(r.best as i64); } }
+    if !sc.bests.is_empty() {
+        let bests = &sc.bests;
+        let (mn, mx) = extrema(bests);
+        row.vals[ci.best] = Cell::Int(mn);
+        row.vals[ci.best_max] = Cell::Int(mx);
+        row.vals[ci.best_count] = Cell::Int(bests.len() as i64);
+        sc.uniq.clear();
+        sc.uniq.extend_from_slice(bests);
+        sc.uniq.sort_unstable();
+        sc.uniq.dedup();
+        row.vals[ci.best_nunique] = Cell::Int(sc.uniq.len() as i64);
+        row.vals[ci.best_mean] = Cell::Float(stats::mean_i(bests));
+        row.vals[ci.best_std] = Cell::Float(stats::std_i(bests));
+        if let Some(v) = stats::trim_avg_i(bests) {
+            row.vals[ci.best_avg] = Cell::Float(v);
         }
-        set(row, "best_median", Cell::Float(stats::median_f_from_i(&bests)));
-        let (mode, mc) = stats::mode_count_i(&bests);
-        set(row, "best_mode", Cell::Int(mode));
-        set(row, "best_mode_count", Cell::Int(mc));
-        let (cc, cs, ce) = stats::calc_consecutive(&bests, &[1]);
-        set(row, "best_consecutive", Cell::Int(cc));
-        set(row, "best_consecutive_start", Cell::Int(cs));
-        set(row, "best_consecutive_end", Cell::Int(ce));
+        row.vals[ci.best_median] = Cell::Float(stats::median_f_from_i(bests));
+        let (mode, mc) = stats::mode_count_i(bests);
+        row.vals[ci.best_mode] = Cell::Int(mode);
+        row.vals[ci.best_mode_count] = Cell::Int(mc);
+        let (cc, cs, ce) = stats::calc_consecutive(bests, &[1]);
+        row.vals[ci.best_consecutive] = Cell::Int(cc);
+        row.vals[ci.best_consecutive_start] = Cell::Int(cs);
+        row.vals[ci.best_consecutive_end] = Cell::Int(ce);
     }
 
     // average_attempts on average != 0
     let avg_attempts = rs.iter().filter(|r| r.average != 0).count();
     if avg_attempts > 0 {
-        set(row, "average_attempts", Cell::Int(avg_attempts as i64));
+        row.vals[ci.average_attempts] = Cell::Int(avg_attempts as i64);
     }
 
     // average stats on average > 0
-    let avgs_i: Vec<i64> = rs.iter().filter(|r| r.average > 0).map(|r| r.average as i64).collect();
-    if !avgs_i.is_empty() {
-        let avgs_real: Vec<f64> = avgs_i.iter().map(|&v| v as f64 / 100.0).collect();
-        let (mn, mx) = extrema_f(&avgs_real);
-        set(row, "average", Cell::Float(mn));
-        set(row, "average_max", Cell::Float(mx));
-        set(row, "average_count", Cell::Int(avgs_real.len() as i64));
-        let mut uniq = avgs_i.clone(); uniq.sort(); uniq.dedup();
-        set(row, "average_nunique", Cell::Int(uniq.len() as i64));
-        set(row, "average_mean", Cell::Float(stats::mean_f(&avgs_real)));
-        set(row, "average_std", Cell::Float(stats::std_f(&avgs_real)));
-        if let Some(v) = stats::trim_avg_f(&avgs_real) {
-            set(row, "average_avg", Cell::Float(v));
+    for r in &rs { if r.average > 0 { sc.avgs_i.push(r.average as i64); } }
+    if !sc.avgs_i.is_empty() {
+        sc.avgs_real.extend(sc.avgs_i.iter().map(|&v| v as f64 / 100.0));
+        let avgs_i = &sc.avgs_i;
+        let avgs_real = &sc.avgs_real;
+        let (mn, mx) = extrema_f(avgs_real);
+        row.vals[ci.average] = Cell::Float(mn);
+        row.vals[ci.average_max] = Cell::Float(mx);
+        row.vals[ci.average_count] = Cell::Int(avgs_real.len() as i64);
+        sc.uniq.clear();
+        sc.uniq.extend_from_slice(avgs_i);
+        sc.uniq.sort_unstable();
+        sc.uniq.dedup();
+        row.vals[ci.average_nunique] = Cell::Int(sc.uniq.len() as i64);
+        row.vals[ci.average_mean] = Cell::Float(stats::mean_f(avgs_real));
+        row.vals[ci.average_std] = Cell::Float(stats::std_f(avgs_real));
+        if let Some(v) = stats::trim_avg_f(avgs_real) {
+            row.vals[ci.average_avg] = Cell::Float(v);
         }
-        // median of Float vector: sort then pick. Use f64 sort.
-        let mut sorted = avgs_real.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let n = sorted.len();
-        let med = if n % 2 == 1 { sorted[n/2] } else { (sorted[n/2-1]+sorted[n/2])/2.0 };
-        set(row, "average_median", Cell::Float(med));
-        // mode is computed on integer average, then divided by 100.
-        let (mode_i, mc) = stats::mode_count_i(&avgs_i);
-        set(row, "average_mode", Cell::Float(mode_i as f64 / 100.0));
-        set(row, "average_mode_count", Cell::Int(mc));
-        let (cc, cs, ce) = stats::calc_consecutive(&avgs_i, &[33, 34]);
-        set(row, "average_consecutive", Cell::Int(cc));
-        set(row, "average_consecutive_start", Cell::Float(cs as f64 / 100.0));
-        set(row, "average_consecutive_end", Cell::Float(ce as f64 / 100.0));
+        sc.avgs_sorted.extend_from_slice(avgs_real);
+        sc.avgs_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = sc.avgs_sorted.len();
+        let med = if n % 2 == 1 { sc.avgs_sorted[n/2] } else { (sc.avgs_sorted[n/2-1]+sc.avgs_sorted[n/2])/2.0 };
+        row.vals[ci.average_median] = Cell::Float(med);
+        let (mode_i, mc) = stats::mode_count_i(avgs_i);
+        row.vals[ci.average_mode] = Cell::Float(mode_i as f64 / 100.0);
+        row.vals[ci.average_mode_count] = Cell::Int(mc);
+        let (cc, cs, ce) = stats::calc_consecutive(avgs_i, &[33, 34]);
+        row.vals[ci.average_consecutive] = Cell::Int(cc);
+        row.vals[ci.average_consecutive_start] = Cell::Float(cs as f64 / 100.0);
+        row.vals[ci.average_consecutive_end] = Cell::Float(ce as f64 / 100.0);
     }
 
     // medals: final rounds (f or c) with best > 0; count pos==1,2,3
     let (mut g, mut s, mut b) = (0i64, 0i64, 0i64);
+    let mut any_final_best = false;
     for r in &rs {
         if r.best > 0 && (r.round_type_id == "f" || r.round_type_id == "c") {
+            any_final_best = true;
             match r.pos { 1 => g+=1, 2 => s+=1, 3 => b+=1, _ => {} }
         }
     }
-    // Julia uses rightjoin semantics, but medals are produced only if any
-    // row matched the filter. With no matches, gold/silver/bronze stay
-    // missing. (In Julia, they become missing for persons with no finals.)
-    // All persons in our rows have at least one result; those without any
-    // final-with-success get missing medals (matches Julia).
-    let any_final_best = rs.iter().any(|r| r.best > 0 && (r.round_type_id == "f" || r.round_type_id == "c"));
     if any_final_best {
-        set(row, "gold", Cell::Int(g));
-        set(row, "silver", Cell::Int(s));
-        set(row, "bronze", Cell::Int(b));
+        row.vals[ci.gold] = Cell::Int(g);
+        row.vals[ci.silver] = Cell::Int(s);
+        row.vals[ci.bronze] = Cell::Int(b);
     }
 
-    // --- Single attempts (per-attempt level) ---
-    // Build the single_res_df equivalent: sorted by (result_id, attempt_number).
-    // We iterate results in sorted id order; attempts are already per-result
-    // sorted by attempt_number in loader.
-    let mut sorted_rs: Vec<&crate::loader::Result333> = rs.clone();
+    // --- Single attempts ---
+    // Sort rs in place by id for per-attempt iteration (attempts are already
+    // sorted by attempt_number per result).
+    let mut sorted_rs = rs;
     sorted_rs.sort_by_key(|r| r.id);
 
-    // Collect all attempts, preserving order (missing attempts => leftjoin
-    // keeps one row per result even with no attempts).
-    struct SingleRow<'a> {
-        result_id: i64,
-        attempt_number: Option<u8>,
-        value: Option<i32>,
-        result: &'a crate::loader::Result333,
-    }
-    let mut single: Vec<SingleRow> = Vec::new();
+    // Build single_values: one Option<i32> per (result_id, attempt_number)
+    // row — None represents a result with no attempts (leftjoin pad).
     for r in &sorted_rs {
         match data.attempts_by_result.get(&r.id) {
             Some(atts) if !atts.is_empty() => {
-                for a in atts {
-                    single.push(SingleRow {
-                        result_id: r.id,
-                        attempt_number: Some(a.attempt_number),
-                        value: Some(a.value),
-                        result: r,
-                    });
-                }
+                for a in atts { sc.single_values.push(Some(a.value)); }
             }
-            _ => {
-                single.push(SingleRow {
-                    result_id: r.id,
-                    attempt_number: None,
-                    value: None,
-                    result: r,
-                });
+            _ => { sc.single_values.push(None); }
+        }
+    }
+
+    row.vals[ci.chances] = Cell::Int(sc.single_values.len() as i64);
+    let attempts_count: i64 = sc.single_values.iter()
+        .filter(|v| v.map(|v| v > -2).unwrap_or(false)).count() as i64;
+    row.vals[ci.attempts] = Cell::Int(attempts_count);
+
+    for v in &sc.single_values {
+        if let Some(v) = v { if *v > 0 { sc.solved.push(*v as i64); } }
+    }
+
+    if !sc.solved.is_empty() {
+        let solved = &sc.solved;
+        row.vals[ci.solved_count] = Cell::Int(solved.len() as i64);
+        sc.uniq.clear();
+        sc.uniq.extend_from_slice(solved);
+        sc.uniq.sort_unstable();
+        sc.uniq.dedup();
+        row.vals[ci.solved_nunique] = Cell::Int(sc.uniq.len() as i64);
+        row.vals[ci.solved_mean] = Cell::Float(stats::mean_i(solved));
+        row.vals[ci.solved_std] = Cell::Float(stats::std_i(solved));
+        if let Some(v) = stats::trim_avg_i(solved) {
+            row.vals[ci.solved_avg] = Cell::Float(v);
+        }
+        row.vals[ci.solved_median] = Cell::Float(stats::median_f_from_i(solved));
+        let (mode, mc) = stats::mode_count_i(solved);
+        row.vals[ci.solved_mode] = Cell::Int(mode);
+        row.vals[ci.solved_mode_count] = Cell::Int(mc);
+        let (mn, mx) = extrema(solved);
+        row.vals[ci.solved_min] = Cell::Int(mn);
+        row.vals[ci.solved_max] = Cell::Int(mx);
+        let (cc, cs, ce) = stats::calc_consecutive(solved, &[1]);
+        row.vals[ci.solved_consecutive] = Cell::Int(cc);
+        row.vals[ci.solved_consecutive_start] = Cell::Int(cs);
+        row.vals[ci.solved_consecutive_end] = Cell::Int(ce);
+
+        for &(n, last_i, best_i) in &ci.solved_mo {
+            if let Some((last, best)) = stats::rolling_mean(solved, n) {
+                row.vals[last_i] = Cell::Float(last);
+                row.vals[best_i] = Cell::Float(best);
+            }
+        }
+        for &(n, last_i, best_i) in &ci.solved_ao {
+            if let Some((last, best)) = stats::rolling_trim_avg(solved, n) {
+                row.vals[last_i] = Cell::Float(last);
+                row.vals[best_i] = Cell::Float(best);
             }
         }
     }
 
-    // chances = total rows in single
-    set(row, "chances", Cell::Int(single.len() as i64));
-    // attempts = rows with value > -2 (i.e., not DNS; DNF=-1 kept; positive values kept)
-    let attempts_count: i64 = single.iter().filter(|s| s.value.map(|v| v > -2).unwrap_or(false)).count() as i64;
-    set(row, "attempts", Cell::Int(attempts_count));
-
-    // solved = value > 0 (in order of single iteration, which is sorted by (id, attempt_number))
-    let solved: Vec<i64> = single
-        .iter()
-        .filter_map(|s| s.value.filter(|v| *v > 0).map(|v| v as i64))
-        .collect();
-
-    if !solved.is_empty() {
-        set(row, "solved_count", Cell::Int(solved.len() as i64));
-        let mut uniq = solved.clone(); uniq.sort(); uniq.dedup();
-        set(row, "solved_nunique", Cell::Int(uniq.len() as i64));
-        set(row, "solved_mean", Cell::Float(stats::mean_i(&solved)));
-        set(row, "solved_std", Cell::Float(stats::std_i(&solved)));
-        if let Some(v) = stats::trim_avg_i(&solved) {
-            set(row, "solved_avg", Cell::Float(v));
-        }
-        set(row, "solved_median", Cell::Float(stats::median_f_from_i(&solved)));
-        let (mode, mc) = stats::mode_count_i(&solved);
-        set(row, "solved_mode", Cell::Int(mode));
-        set(row, "solved_mode_count", Cell::Int(mc));
-        let (mn, mx) = extrema(&solved);
-        set(row, "solved_min", Cell::Int(mn));
-        set(row, "solved_max", Cell::Int(mx));
-        let (cc, cs, ce) = stats::calc_consecutive(&solved, &[1]);
-        set(row, "solved_consecutive", Cell::Int(cc));
-        set(row, "solved_consecutive_start", Cell::Int(cs));
-        set(row, "solved_consecutive_end", Cell::Int(ce));
-
-        for n in [3usize, 5, 12, 50, 100] {
-            if let Some((last, best)) = stats::rolling_mean(&solved, n) {
-                set(row, &format!("solved_mo{}_last", n), Cell::Float(last));
-                set(row, &format!("solved_mo{}_best", n), Cell::Float(best));
-            }
-        }
-        for n in [5usize, 12, 50, 100] {
-            if let Some((last, best)) = stats::rolling_trim_avg(&solved, n) {
-                set(row, &format!("solved_ao{}_last", n), Cell::Float(last));
-                set(row, &format!("solved_ao{}_best", n), Cell::Float(best));
-            }
-        }
-    }
-
-    // --- avg_item_3rd/2nd (per round average, then per person extrema) ---
-    // For each result with average > 0, compute max and median (as i64) of
-    // its attempt values. Note: attempts here are the raw values from
-    // result_attempts (can include -1/-2 for DNF/DNS). Julia operates on
-    // the :value column of single_df after filter(:average => >(0)).
-    let mut worsts: Vec<i64> = Vec::new();
-    let mut medians: Vec<i64> = Vec::new();
+    // --- avg_item_3rd/2nd ---
     for r in &sorted_rs {
         if r.average <= 0 { continue; }
         if let Some(atts) = data.attempts_by_result.get(&r.id) {
-            let vs: Vec<i64> = atts.iter().map(|a| a.value as i64).collect();
-            if vs.is_empty() { continue; }
-            worsts.push(*vs.iter().max().unwrap());
-            medians.push(stats::median_i(&vs));
+            if atts.is_empty() { continue; }
+            sc.att_vs.clear();
+            for a in atts { sc.att_vs.push(a.value as i64); }
+            sc.worsts.push(*sc.att_vs.iter().max().unwrap());
+            sc.medians.push(stats::median_i(&sc.att_vs));
         }
     }
-    if !worsts.is_empty() {
-        let (mn, mx) = extrema(&worsts);
-        set(row, "avg_item_3rd_min", Cell::Int(mn));
-        set(row, "avg_item_3rd_max", Cell::Int(mx));
-        let (mn, mx) = extrema(&medians);
-        set(row, "avg_item_2nd_min", Cell::Int(mn));
-        set(row, "avg_item_2nd_max", Cell::Int(mx));
+    if !sc.worsts.is_empty() {
+        let (mn, mx) = extrema(&sc.worsts);
+        row.vals[ci.avg_item_3rd_min] = Cell::Int(mn);
+        row.vals[ci.avg_item_3rd_max] = Cell::Int(mx);
+        let (mn, mx) = extrema(&sc.medians);
+        row.vals[ci.avg_item_2nd_min] = Cell::Int(mn);
+        row.vals[ci.avg_item_2nd_max] = Cell::Int(mx);
     }
 }
 
