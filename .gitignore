@@ -38,3 +38,6 @@ rust-wca-stats/target/
 # cpp build artifacts
 cpp-wca-stats/build/
 
+
+# perf_topdown.sh output
+/perf-reports/
