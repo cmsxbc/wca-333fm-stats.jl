@@ -1,8 +1,16 @@
-# Julia Implementation — Profile & Optimization Notes
+# Julia Implementation — Historical Profile & Optimization Notes
 
-This document captures the profiling of the original Julia `WCAStats.jl`
-implementation, the hotspots it revealed, and the optimizations that were
-applied on top.
+This document is a historical archive for the pre-rewrite Julia
+`WCAStats.jl` implementation, which was built on DataFrames/CSV-based
+processing.
+
+The current Julia implementation is the custom parser / typed-data rewrite
+described in [`JULIA_REWRITE.md`](JULIA_REWRITE.md), which reports a full-export
+runtime of about **48 s** and byte-identical parity with the Rust reference.
+
+What follows captures the profiling of the earlier implementation, the hotspots
+it revealed, and the optimizations that were applied before the full rewrite
+landed.
 
 The profile was collected with the built-in `--profile` flag (Julia's sampling
 profiler, 10 ms interval) and corroborated with coarse `time()` wrappers around
@@ -70,7 +78,7 @@ From `/tmp/julia_profile.txt` (24 037 samples), the hottest clusters were:
 4. **JIT + startup ≈ 10 %** — unavoidable single-cost; `PackageCompiler.jl`
    would trade compile time for cleaner repeat runs.
 
-## 2. Applied optimizations
+## 2. Historical optimizations before the rewrite
 
 Two localized changes in `WCAStats.jl`, no behavioral impact (all 48 output
 CSVs are byte-identical to the baseline):
