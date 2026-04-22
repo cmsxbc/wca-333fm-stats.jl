@@ -835,8 +835,8 @@ mutable struct Row
     vals::Vector{Cell}
     ranks::Vector{Cell}
     nrs::Vector{Cell}
-    year::Cell
-    category::Cell
+    year::Union{Missing,Int64}
+    category::Union{Missing,String}
 end
 
 struct Frame
@@ -1495,7 +1495,7 @@ function process_data(parsed_args)
 
     summary_rows = Row[]
     last_rows = Dict{String, Row}()
-    summary_header = nothing
+    summary_header = is_summary ? header_for_summary() : nothing
 
     n_years = length(years)
     for (yi, year) in enumerate(years)
@@ -1537,7 +1537,8 @@ function process_data(parsed_args)
                     print_topk(df, parsed_args["topk"]["col"], parsed_args["topk"]["k"],
                                parsed_args["topk"]["country"])
                 elseif cmd === "person"
-                    print_some_persons(df, parsed_args["person"]["ids"])
+                    ids = parsed_args["person"]["ids"]
+                    print_some_persons(df, ids isa Vector{String} ? ids : String.(ids))
                 end
             end
         end
