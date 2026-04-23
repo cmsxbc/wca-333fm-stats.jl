@@ -12,6 +12,10 @@ the C++23 and Rust ports of `WCAStats.jl` on a full WCA export run.
   All measurements are pinned to the P-cores via `taskset -c 0-11` so that
   `cpu_core/` events do not mix with `cpu_atom/`.
 
+> For the same comparison on **AMD Ryzen 9 7950X (Zen 4)**, extended to
+> include the Julia reference implementation, see
+> [`PERF_ANALYSIS_ZEN4.md`](./PERF_ANALYSIS_ZEN4.md).
+
 To reproduce (or re-run on a different machine) use the
 [`perf_topdown.sh`](./perf_topdown.sh) script in the repo root. It auto-picks
 P-cores, runs three top-down levels plus a raw counter block, and emits a
